@@ -32,24 +32,24 @@ z = torch.from_numpy(z).type(torch.LongTensor)
 
 
 import matplotlib.pyplot as plt
-def plot_data(x,y,epoch):    
+def plot_data(x,y,epoch):
     plt.cla()
     plt.clf()
-    fig, ax = plt.subplots()    
+    fig, ax = plt.subplots()
     ax.set_title("Epoch:"+str(epoch))
     fig.dpi = 100.0
     plt.xlim([0, seq_size])
     plt.ylim([0, vocab_size])
     plt.plot(x)
     plt.plot(y)
-    plt.savefig(str(epoch)+".png")    
+    plt.savefig(str(epoch)+".png")
 epoch_num = 100
-test = TransformerTranslator(token_size,num_blocks,num_heads,vocab_size)
+test = TransformerTranslator( token_size, num_blocks, num_heads, vocab_size)
 optimizer = torch.optim.Adam(test.parameters(), lr=1e-2)
 criterion = nn.MSELoss()
 import random
 for i in range(epoch_num):
-    outs = []   
+    outs = []
     avg_loss = []
     ix = y.unsqueeze(0)
     test.zero_grad()
@@ -64,7 +64,7 @@ for i in range(epoch_num):
             iy = iy_label_outs_args#y[:interval_jdx]
         else:
             iy = torch.tensor([0],dtype=torch.int64)
-        #Predict next token        
+        #Predict next token
         iy = iy.unsqueeze(0)
         out = test.forward(iy)
 
@@ -74,13 +74,13 @@ for i in range(epoch_num):
 
         if(interval_jdx!=1):
             torch_outs = torch.cat((torch_outs,out),dim=1)
-            iy_label_outs = torch.cat((iy_label_outs,iy_label),dim=0)           
+            iy_label_outs = torch.cat((iy_label_outs,iy_label),dim=0)
         else:
             torch_outs = out
-            iy_label_outs = iy_label        
+            iy_label_outs = iy_label
         iy_label_outs_args = torch.cat((iy_label_outs_args,torch.tensor([torch.argmax(out)],dtype=torch.int64)),dim=0)
-        outs.append(torch.argmax(out.detach()))    
-    #plot_data(y,outs,i)   
+        outs.append(torch.argmax(out.detach()))
+    #plot_data(y,outs,i)
     loss = criterion(iy_label_outs,torch_outs[0])
     loss.backward()
     optimizer.step()
@@ -90,7 +90,7 @@ for i in range(epoch_num):
 
 import random
 for i in range(1):
-    outs = []   
+    outs = []
     avg_loss = []
     ix = y.unsqueeze(0)
     torch_outs = None
@@ -102,9 +102,9 @@ for i in range(1):
             iy = iy_label_outs_args#y[:interval_jdx]
         else:
             iy = torch.tensor([0],dtype=torch.int64)
-        #Predict next token        
+        #Predict next token
         iy = iy.unsqueeze(0)
-        out = test.forward(iy) 
+        out = test.forward(iy)
 
         iy_label_raw = np.zeros((vocab_size))
         iy_label_raw[y[interval_jdx-1]] = 1
@@ -112,11 +112,11 @@ for i in range(1):
 
         if(interval_jdx!=1):
             torch_outs = torch.cat((torch_outs,out),dim=1)
-            iy_label_outs = torch.cat((iy_label_outs,iy_label),dim=0)    
+            iy_label_outs = torch.cat((iy_label_outs,iy_label),dim=0)
         else:
             torch_outs = out
             iy_label_outs = iy_label
-        
+
         iy_label_outs_args = torch.cat((iy_label_outs_args,torch.tensor([torch.argmax(out)],dtype=torch.int64)),dim=0)
         outs.append(torch.argmax(out.detach()))
 

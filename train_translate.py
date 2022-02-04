@@ -1,11 +1,11 @@
 from Dataset.translation_dataset import EnglishToGermanDataset
-from Transformer.transfomer import TransformerTranslator
+from Transformer.transfomer import TransformerTranslator,TransformerTranslatorFeng
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-from tqdm import tqdm 
+from tqdm import tqdm
 import os
 
 
@@ -15,18 +15,19 @@ Hyperparameters
 CUDA = False
 PRINT_INTERVAL = 5000
 VALIDATE_AMOUNT = 10
-SAVE_INTERVAL = 1000
+SAVE_INTERVAL = 50
 
 batch_size = 32
 embed_dim = 64
 num_blocks = 2
-num_heads = 1 #Must be factor of token size
+num_heads = 4 #Must be factor of token size
 max_context_length = 1000
 
-num_epochs = 1000
-learning_rate = 1e-2
+num_epochs = 10
+learning_rate = 1e-3
 
 device = torch.device('cuda:0' if CUDA else 'cpu')
+
 
 """
 Dataset
@@ -38,26 +39,58 @@ dataloader_test = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sh
 """
 Model
 """
-vocab_size = dataset.german_vocab_len
+# vocab_size = dataset.german_vocab_len
+# vocab_size = dataset.english_vocab_len
+# print((dataset.english_vocab_len, dataset.german_vocab_len))
+# assert 0
 torch.set_default_tensor_type(torch.cuda.FloatTensor if CUDA else torch.FloatTensor)
-model = TransformerTranslator(embed_dim,num_blocks,num_heads,vocab_size,CUDA=CUDA).to(device)
+model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
 """
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-criterion = nn.KLDivLoss()
+def sqrt_sum( output_log , target):
+    # print(output_log.shape)
+    loss = torch.exp(output_log/2.) * target
+    loss = torch.sum(loss,axis=-1)
+    loss = -torch.mean(loss)
+    #(output-target*2)**3)
+    return loss
+criterion = sqrt_sum
 
+optimizer = torch.optim.Adam( model.parameters(), lr=learning_rate)
+criterion = nn.KLDivLoss(reduction='batchmean')
 """
 Load From Checkpoint
 """
-LOAD = -1
+import sys
+if '--auto' in sys.argv:
+    LOAD_GET_AUTO = 1
+else:
+    LOAD_GET_AUTO = 0
+
+import glob
+from pprint import pprint
+os.makedirs('Checkpoints') if not os.path.exists('Checkpoints') else None
+
+if LOAD_GET_AUTO:
+    res = glob.glob('Checkpoints/*pkl')
+    getLoad = lambda x:int(x.replace('Checkpoints/Checkpoint','').split('.')[0])
+    res = sorted(res,key=getLoad)[-1]
+    LOAD= getLoad(res)
+else:
+    LOAD = -1
+
+if '--LOAD' in sys.argv:
+    LOAD = sys.argv[sys.argv.index('--LOAD')+1]
+    LOAD = int(LOAD)
+
 
 if(LOAD!=-1):
-    checkpoint = torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
-    test_losses = checkpoint["test_losses"]
+    checkpoint   = torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
+    test_losses  = checkpoint["test_losses"]
     train_losses = checkpoint["train_losses"]
-    num_steps = checkpoint["num_steps"]
+    num_steps    = checkpoint["num_steps"]
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
 else:
@@ -68,12 +101,13 @@ else:
 Train Loop
 """
 for epoch in range(num_epochs):
-    running_loss = []   
-    running_test_loss = []     
+    running_loss = []
+    running_test_loss = []
     dataset.train()
     """
     TRAIN LOOP
     """
+    # print(model.state_dict().keys())
     for idx,item in enumerate(tqdm(dataloader)):
         """
         ============================================================
@@ -86,41 +120,42 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
         ###################
 
-        ###################        
+        ###################
         #Encode English Sentence
         model.encode(item["english"][:,1:-1])
-        ###################        
+        # print(item["german"][:,1:-1][:1])
+        ###################
 
-        ###################        
+        ###################
         #Output German, One Token At A Time
         all_outs = torch.tensor([],requires_grad=True).to(device)
         for i in range(item["german"].shape[1]-1):
             out = model(item["german"][:,:i+1])
             all_outs = torch.cat((all_outs,out),dim=1)
-        ###################        
+        ###################
 
-        ###################        
+        ###################
         #Mask Out Extra Padded Tokens In The End(Optional)
         all_outs = all_outs * item["logit_mask"][:,1:,:]
         item["logits"] = item["logits"] * item["logit_mask"]
         ###################
 
-        ###################        
+        ###################
         #BackProp
         loss = criterion(all_outs,item["logits"][:,1:,:])
         loss.backward()
         optimizer.step()
-        ###################        
+        ###################
 
         running_loss.append(loss.item())
         num_steps +=1
         """
         ============================================================
         """
-        if(num_steps % PRINT_INTERVAL ==0 or idx==len(dataloader)-1):            
+        if(num_steps % PRINT_INTERVAL ==0 or idx==len(dataloader)-1):
             """
             Validation LOOP
-            """                        
+            """
             all_outs.detach().cpu()
             item["logits"].detach().cpu()
             dataset.test()
@@ -130,7 +165,7 @@ for epoch in range(num_epochs):
                     model.encode(item["english"][:,1:-1])
                     all_outs = torch.tensor([],requires_grad=True).to(device)
                     for i in range(item["german"].shape[1]-1):
-                        out = model(item["german"][:,:i+1])                        
+                        out = model(item["german"][:,:i+1])
                         all_outs = torch.cat((all_outs,out),dim=1)
                     all_outs = all_outs * item["logit_mask"][:,1:,:]
                     item["logits"] = item["logits"] * item["logit_mask"]
@@ -141,7 +176,7 @@ for epoch in range(num_epochs):
             avg_test_loss = np.array(running_test_loss).mean()
             test_losses.append(avg_test_loss)
             avg_loss = np.array(running_loss).mean()
-            train_losses.append(avg_loss)        
+            train_losses.append(avg_loss)
             print("LABEL: ",dataset.logit_to_sentence(item["logits"][0]))
             print("===")
             print("PRED: ",dataset.logit_to_sentence(all_outs[0]))
@@ -149,7 +184,8 @@ for epoch in range(num_epochs):
             print(f"TEST LOSS {avg_test_loss} | EPOCH {epoch}")
             print("BACK TO TRAINING:")
             dataset.train()
-        if(num_steps % SAVE_INTERVAL ==0):            
+
+        if(num_steps % SAVE_INTERVAL ==0):
             torch.save({
                 "model":model.state_dict(),
                 "optimizer":optimizer.state_dict(),

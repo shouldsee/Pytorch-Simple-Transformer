@@ -33,7 +33,7 @@ class SelfAttention(nn.Module):
         #Apply attention weights to value
         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
         attention_weighted_value = self.dropout(attention_weighted_value)
-        
+
         return attention_weighted_value
 class MultiHeadAttention(nn.Module):
     def __init__(self,embed_dim,d_k,d_v,num_heads,mask=False,CUDA=False):
@@ -41,14 +41,15 @@ class MultiHeadAttention(nn.Module):
         self.attention_blocks = [
             SelfAttention(embed_dim,d_k,d_v,mask) for _ in range(num_heads)
         ]
+        [setattr(self,'attention_block_%d'%xi,xxx) for xi,xxx in enumerate(self.attention_blocks)] 
         self.norm = LayerNorm(embed_dim)
         self.CUDA = CUDA
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
-    def forward(self,query,key,value,residual_x):                
-        attention_out = torch.tensor([],requires_grad=True).to(self.device)        
+    def forward(self,query,key,value,residual_x):
+        attention_out = torch.tensor([],requires_grad=True).to(self.device)
         for attention in self.attention_blocks:
-            attention_out = torch.cat((attention_out,attention(query,key,value)),dim=2)        
-        add_and_norm = self.norm(attention_out + residual_x)        
+            attention_out = torch.cat((attention_out,attention(query,key,value)),dim=2)
+        add_and_norm = self.norm(attention_out + residual_x)
         return add_and_norm
 
 class LayerNorm(nn.Module):
@@ -60,8 +61,8 @@ class LayerNorm(nn.Module):
         self.eps = eps
     def forward(self, x):
         mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True) 
-        div =  (std + self.eps) + self.shift        
+        std = x.std(-1, keepdim=True)
+        div =  (std + self.eps) + self.shift
         return self.scale * (x - mean) /(div)
 class PositionWiseFeedForward(nn.Module):
     def __init__(self,embed_dim,output_dim):
@@ -75,7 +76,7 @@ class PositionWiseFeedForward(nn.Module):
         x = torch.max(torch.zeros(x.shape),self.l1(x))
         x = self.RELU(x)
         x = self.l2(x)
-        x = self.dropout(x)        
+        x = self.dropout(x)
         x = self.norm(x+residual_x)
         return x
 
@@ -93,19 +94,20 @@ class VocabLogits(nn.Module):
     def __init__(self,embed_dim,logit_dim):
         super(VocabLogits,self).__init__()
         self.linear = nn.Linear(embed_dim,logit_dim)
-    def forward(self,x):        
+    def forward(self,x):
         return F.log_softmax(self.linear(x),dim=-1)
-    
+
 class Embeddings(nn.Module):
     "Taken from Annotated Transformer (HarvardNLP)"
     def __init__(self,vocab_length,embed_dim,CUDA=False):
         super(Embeddings, self).__init__()
         self.lut = nn.Embedding(vocab_length, embed_dim)
-        self.pos_encode = PositionalEncoding(embed_dim,CUDA=CUDA)
+        # self.pos_encode = PositionalEncoding(embed_dim,CUDA=CUDA)
         self.embed_dim = embed_dim
     def forward(self, x):
         embed = (self.lut(x) * math.sqrt(self.embed_dim))
-        return embed+self.pos_encode(embed)
+        return embed
+        # +self.pos_encode(embed)
 
 class PositionalEncoding(nn.Module):
     "Modified From Annotated Transformer (HarvardNLP)"
@@ -122,8 +124,8 @@ class PositionalEncoding(nn.Module):
         if(CUDA==True):
             pe.type(torch.cuda.FloatTensor)
         self.register_buffer('pe', pe)
-        
-    def forward(self, x):                        
-        x = x + Variable(self.pe[:, :x.size(1)], 
+
+    def forward(self, x):
+        x = x + Variable(self.pe[:, :x.size(1)],
                          requires_grad=False)
         return x
