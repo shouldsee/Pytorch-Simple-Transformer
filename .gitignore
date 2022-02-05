@@ -1,2 +1,4 @@
 Translate_Dataset/
 Checkpoints/
+*__pycache__*
+
