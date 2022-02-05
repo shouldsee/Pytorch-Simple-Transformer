@@ -18,9 +18,9 @@ class SelfAttention(nn.Module):
         self.mask = mask
         self.dropout = nn.Dropout(0.1)
     def forward(self,query_in,key_in,value_in):
-        query = self.query_embed(query_in)
-        key = self.key_embed(key_in)
-        value = self.value_embed(value_in)
+        query = self.query_embed (query_in)
+        key   = self.key_embed   (key_in)
+        value = self.value_embed (value_in)
         key_transposed = torch.transpose(key,1,2)
         #Get attention weights
         attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
@@ -30,6 +30,7 @@ class SelfAttention(nn.Module):
             indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
             attention_weights[:, indices[0], indices[1]] = float('-inf')
         attention_weights = F.softmax(attention_weights, dim=2)
+        # attention_weights
         #Apply attention weights to value
         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
         attention_weighted_value = self.dropout(attention_weighted_value)
@@ -41,7 +42,7 @@ class MultiHeadAttention(nn.Module):
         self.attention_blocks = [
             SelfAttention(embed_dim,d_k,d_v,mask) for _ in range(num_heads)
         ]
-        [setattr(self,'attention_block_%d'%xi,xxx) for xi,xxx in enumerate(self.attention_blocks)] 
+        [setattr(self,'attention_block_%d'%xi,xxx) for xi,xxx in enumerate(self.attention_blocks)]
         self.norm = LayerNorm(embed_dim)
         self.CUDA = CUDA
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
@@ -87,11 +88,12 @@ class TransformerBlock(nn.Module):
         self.feed_forward = PositionWiseFeedForward(embed_dim,embed_dim)
     def forward(self,query,key,value,residual_x):
         attention_out = self.multi_head_attention(query,key,value,residual_x)
+        # return attention_out
         feed_forward_out = self.feed_forward(attention_out,attention_out)
         return feed_forward_out
 
 class VocabLogits(nn.Module):
-    def __init__(self,embed_dim,logit_dim):
+    def __init__(self,embed_dim,logit_dim,CUDA=False):
         super(VocabLogits,self).__init__()
         self.linear = nn.Linear(embed_dim,logit_dim)
     def forward(self,x):

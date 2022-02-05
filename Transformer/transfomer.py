@@ -18,7 +18,9 @@ class Encoder(nn.Module):
     def forward(self, x):
         # x = self.positional_encoding(x)
         for block in self.transformer_blocks:
-            x = block(x,x,x,x)
+            # block0 = self.transformer_blocks[0]
+            block0 = block
+            x = block0(x,x,x,x)
         return x
 
 class Decoder(nn.Module):
@@ -42,12 +44,14 @@ class Decoder(nn.Module):
                       residual_x=output_seq_attention_out)
         return self.vocab_logits(x)
 
+
 class TransformerTranslator(nn.Module):
     def __init__(self,embed_dim,num_blocks,num_heads,vocab_size,CUDA=False):
         super(TransformerTranslator,self).__init__()
         self.embedding = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
         self.encoder = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.decoder = Decoder(embed_dim,num_heads,num_blocks,vocab_size,CUDA=CUDA)
+        self.decoder2 = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.encoded = False
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
     def encode(self,input_sequence):
@@ -68,18 +72,23 @@ class TransformerTranslatorFeng(nn.Module):
         super(TransformerTranslatorFeng,self).__init__()
         self.embedding = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
         self.embedding2 = Embeddings(output_vocab_size,embed_dim,CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
         self.encoder = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.decoder = Decoder(embed_dim,num_heads,num_blocks,output_vocab_size,CUDA=CUDA)
+        self.decoder2 = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.encoded = False
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
     def encode(self,input_sequence):
         embedding = self.embedding(input_sequence).to(self.device)
         self.encode_out = self.encoder(embedding)
         self.encoded = True
-    def forward(self,output_sequence):
+    def forward(self, output_sequence):
         if(self.encoded==False):
             print("ERROR::TransformerTranslator:: MUST ENCODE FIRST.")
             return output_sequence
         else:
+            x=  self.decoder2(output_sequence)
+            return self.vocab(x)
+
             embedding = self.embedding2(output_sequence)
             return self.decoder(self.encode_out,embedding)
