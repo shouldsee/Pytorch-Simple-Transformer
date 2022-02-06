@@ -8,19 +8,24 @@ import math
 Transformer Implementation By Chenrong Lu 2021
 Some Layers Refer to The Annotated Transformer (Harvard NLP)
 """
-class SelfAttention(nn.Module):
+class SelfAttentionOld(nn.Module):
     def __init__(self,embed_dim,d_k,d_v,mask=False):
-        super(SelfAttention,self).__init__()
+        super(SelfAttentionOld,self).__init__()
         self.query_embed = nn.Linear(embed_dim,d_k)
         self.key_embed = nn.Linear(embed_dim,d_k)
         self.value_embed = nn.Linear(embed_dim,d_v)
         self.d_k = d_k
         self.mask = mask
         self.dropout = nn.Dropout(0.1)
+
     def forward(self,query_in,key_in,value_in):
         query = self.query_embed (query_in)
         key   = self.key_embed   (key_in)
         value = self.value_embed (value_in)
+        # value = value_in
+
+        # value = value_in
+        # value = value_in
         key_transposed = torch.transpose(key,1,2)
         #Get attention weights
         attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
@@ -29,13 +34,133 @@ class SelfAttention(nn.Module):
             #REF : http://peterbloem.nl/blog/transformers
             indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
             attention_weights[:, indices[0], indices[1]] = float('-inf')
+        # attention_weights = torch.abs(attention_weights)
         attention_weights = F.softmax(attention_weights, dim=2)
+        # attention_weights = attention_weights - torch.transpose(attention_weights,1,2)
+        attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
+
         # attention_weights
         #Apply attention weights to value
         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
+        # attention_weighted_value = self.value_embed(attention_weighted_value)
         attention_weighted_value = self.dropout(attention_weighted_value)
-
         return attention_weighted_value
+
+# class SelfAttention(nn.Module):
+#     def __init__(self,embed_dim,d_k,d_v,mask=False):
+#         super(SelfAttention,self).__init__()
+#         self.query_embed = nn.Linear(embed_dim,d_k,bias=False)
+#         self.key_embed   = nn.Linear(embed_dim,d_k,bias=False)
+#         self.value_embed = nn.Linear(embed_dim,d_v,bias=False)
+#         self.d_k  = d_k
+#         self.mask = mask
+#         self.dropout = nn.Dropout(0.1)
+#
+#     def forward(self,query_in,key_in,value_in):
+#
+#         # query_weight
+#         # query = self.query_embed (query_in)
+#         qwt   = torch.softmax(self.query_embed.weight,dim=0)
+#         qwt   = qwt -torch.mean(qwt,dim=0,keepdim=True)
+#         query = torch.matmul(query_in, qwt)
+#          # self.query_embed (query_in)
+#         # key   = self.key_embed   (key_in)
+#         kwt   = torch.softmax(self.key_embed.weight,dim=0)
+#         kwt   = kwt -torch.mean(kwt,dim=0,keepdim=True)
+#         key   = torch.matmul(key_in,kwt)
+#
+#         value = self.value_embed (value_in)
+#
+#         key_transposed = torch.transpose(key,1,2)
+#         #Get attention weights
+#         attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
+#         attention_weights = attention_weights/math.sqrt(self.d_k)
+#         if(self.mask==True):
+#             #REF : http://peterbloem.nl/blog/transformers
+#             indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
+#             attention_weights[:, indices[0], indices[1]] = float('-inf')
+#         shape0 = attention_weights.shape
+#
+#         # attention_weights = F.softmax(attention_weights,dim=2)
+#
+#         attention_weights = F.softmax(attention_weights.reshape((shape0[0],-1)), dim=1)
+#         attention_weights = attention_weights.reshape(shape0)
+#         # ss = attention_weights - torch.max(attention_weights,dim=(2,))
+#         # attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
+#
+#         #Apply attention weights to value
+#         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
+#         attention_weighted_value = self.dropout(attention_weighted_value)
+#         return attention_weighted_value
+
+class SelfAttention(nn.Module):
+    def __init__(self,embed_dim,d_k,d_v,mask=False,CUDA=False):
+        super(SelfAttention,self).__init__()
+        self.attention = GenericAttention(
+            d_q = embed_dim,
+            d_k = embed_dim,
+            d_v = embed_dim,
+            d_ker = d_k,  d_o = d_v)
+    def forward(self, q,k,v):
+        return self.attention(q,k,v)
+
+class GenericAttention(nn.Module):
+    def __init__(self, d_q, d_k, d_ker, d_v, d_o ,mask=False,CUDA=False):
+    # def __init__(self,embed_dim,d_k,d_v,mask=False,CUDA=False):
+        super(GenericAttention,self).__init__()
+        # self.query_embed = nn.Linear(embed_dim,d_k,bias=False)
+        # self.key_embed   = nn.Linear(embed_dim,d_k,bias=False)
+        # self.value_embed = nn.Linear(embed_dim,d_v,bias=False)
+        self.query_embed = nn.Linear(d_q, d_ker)
+        self.key_embed   = nn.Linear(d_k, d_ker)
+        self.value_embed = nn.Linear(d_v, d_o)
+        self.d_k  = d_k
+        self.mask = mask
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self,query_in,key_in,value_in):
+
+        # query_weight
+        query = self.query_embed (query_in)
+        qwt   = torch.softmax(self.query_embed.weight,dim=0)
+        qwt   = qwt -torch.mean(qwt,dim=0,keepdim=True)
+        query = torch.matmul(query_in, qwt)
+
+        key   = self.key_embed   (key_in)
+        kwt   = torch.softmax(self.key_embed.weight,dim=0)
+        kwt   = kwt -torch.mean(kwt,dim=0,keepdim=True)
+        key   = torch.matmul(key_in,kwt)
+
+        value = self.value_embed (value_in)
+
+        # query = to
+        # query = query / (torch.mean(torch.abs(query),dim=2,keepdim=True))
+        # key   = key   / (torch.mean(torch.abs(key),dim=2,keepdim=True))
+        key_transposed = torch.transpose(key,1,2)
+        #Get attention weights
+        attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
+        # attention_weights = attention_weights/math.sqrt(self.d_k)
+        # print(attention_weights.shape)
+        attention_weights = attention_weights - 0.5 * torch.sum(torch.square(query),dim=2,keepdim=True)
+        attention_weights = attention_weights - 0.5 * torch.transpose(torch.sum(torch.square(key),dim=2,keepdim=True),1,2)
+        if(self.mask==True):
+            #REF : http://peterbloem.nl/blog/transformers
+            indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
+            attention_weights[:, indices[0], indices[1]] = float('-inf')
+        shape0 = attention_weights.shape
+
+        attention_weights = F.softmax(attention_weights,dim=2)
+
+        # attention_weights = F.softmax(attention_weights.reshape((shape0[0],-1)), dim=1)
+        # attention_weights = attention_weights.reshape(shape0)
+        # ss = attention_weights - torch.max(attention_weights,dim=(2,))
+        attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
+
+        #Apply attention weights to value
+        attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
+        attention_weighted_value = self.dropout(attention_weighted_value)
+        return attention_weighted_value
+
 class MultiHeadAttention(nn.Module):
     def __init__(self,embed_dim,d_k,d_v,num_heads,mask=False,CUDA=False):
         super(MultiHeadAttention,self).__init__()
@@ -47,6 +172,7 @@ class MultiHeadAttention(nn.Module):
         self.CUDA = CUDA
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
     def forward(self,query,key,value,residual_x):
+        # residual_x = 0.
         attention_out = torch.tensor([],requires_grad=True).to(self.device)
         for attention in self.attention_blocks:
             attention_out = torch.cat((attention_out,attention(query,key,value)),dim=2)
@@ -78,7 +204,7 @@ class PositionWiseFeedForward(nn.Module):
         x = self.RELU(x)
         x = self.l2(x)
         x = self.dropout(x)
-        x = self.norm(x+residual_x)
+        x = self.norm(x + residual_x)
         return x
 
 class TransformerBlock(nn.Module):
@@ -123,9 +249,9 @@ class PositionalEncoding(nn.Module):
         pe[:, 0::2] = torch.sin(position * div_term_even)
         pe[:, 1::2] = torch.cos(position * div_term_odd)
         pe = pe.unsqueeze(0)
-        if(CUDA==True):
-            pe.type(torch.cuda.FloatTensor)
-        self.register_buffer('pe', pe)
+        # if(CUDA==True):
+        #     pe.type(torch.cuda.FloatTensor)
+        # self.register_buffer('pe', pe)
 
     def forward(self, x):
         x = x + Variable(self.pe[:, :x.size(1)],

@@ -1,5 +1,7 @@
 from Dataset.translation_dataset import EnglishToGermanDataset
-from Transformer.transfomer import TransformerTranslator,TransformerTranslatorFeng
+# from Transformer.transfomer import TransformerTranslator
+from Transformer.transfomer import TransformerTranslatorFeng
+# ,TransformerTranslatorFeng
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,16 +17,16 @@ Hyperparameters
 CUDA = False
 PRINT_INTERVAL = 5000
 VALIDATE_AMOUNT = 10
-SAVE_INTERVAL = 50
 
-batch_size = 32
+batch_size = 128
 embed_dim = 64
 num_blocks = 4
-num_heads = 8 #Must be factor of token size
+num_heads = 1 #Must be factor of token size
 max_context_length = 1000
 
-num_epochs = 10
-learning_rate = 1e-4
+SAVE_INTERVAL = 1000//batch_size
+num_epochs = 1000
+learning_rate = 1e-3
 
 device = torch.device('cuda:0' if CUDA else 'cpu')
 
@@ -35,7 +37,7 @@ Dataset
 dataset = EnglishToGermanDataset(CUDA=CUDA)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 dataloader_test = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-
+# assert 0
 """
 Model
 """
@@ -44,7 +46,9 @@ Model
 # print((dataset.english_vocab_len, dataset.german_vocab_len))
 # assert 0
 torch.set_default_tensor_type(torch.cuda.FloatTensor if CUDA else torch.FloatTensor)
-model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,CUDA=CUDA).to(device)
+model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,
+max_context_length=max_context_length,
+CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
@@ -92,8 +96,20 @@ def main():
         test_losses  = checkpoint["test_losses"]
         train_losses = checkpoint["train_losses"]
         num_steps    = checkpoint["num_steps"]
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        x = checkpoint["model"]
+
+        xx = {}
+        for k,v in x.items():
+            if k in dict(model.named_parameters()):
+                xx[k] = v
+            else:
+                pass
+                # print(k)
+        x = xx
+        # x = {k:v for k,v in x.items() if k in dict(model.named_parameters())}
+
+        model.load_state_dict(x)
+        # optimizer.load_state_dict(checkpoint["optimizer"])
     else:
         test_losses = []
         train_losses = []
@@ -108,6 +124,7 @@ def main():
         """
         TRAIN LOOP
         """
+
         # print(model.state_dict().keys())
         for idx,item in enumerate(tqdm(dataloader)):
             """
@@ -123,31 +140,35 @@ def main():
 
             ###################
             #Encode English Sentence
-            model.encode(item["english"][:,1:-1])
+            # perm = np.random.permutation(item["english"][:,1:-1].shape[1])
+            model.encode(item["english"][:,1:-1][:,:])
             # print(item["german"][:,1:-1][:1])
             ###################
 
             ###################
             #Output German, One Token At A Time
-            # all_outs = torch.tensor([],requires_grad=True).to(device)
+            all_outs = torch.tensor([],requires_grad=True).to(device)
             # print(item["german"].shape[1])
-            all_outs = model(model.encode_out)[:,:]
+            # all_outs = model(model.encode_out)[:,:]
             # item["german"].shape[1]-1]
-            # for i in range(item["german"].shape[1]-1):
-            #     out = model(item["german"][:,:i+1])
-            #     all_outs = torch.cat((all_outs,out),dim=1)
+            for i in range(item["german"].shape[1]-1):
+                out = model(item["german"][:,:i+1])
+                all_outs = torch.cat((all_outs,out),dim=1)
             ###################
 
             ###################
             #Mask Out Extra Padded Tokens In The End(Optional)
-            all_outs = all_outs * item["logit_mask"][:,1:-2,:]
-            item["logits"] = item["logits"] * item["logit_mask"]
+            # outputRotation = torch.eye(all_outs.shape[1])
+            # print(outputRotation.shape)
+            # [1])
+            all_outs = all_outs * item["logit_mask"][:,:-1]
+            # item["logits"] = item["logits"] * item["logit_mask"]
 
             ###################
 
             ###################
             #BackProp
-            loss = criterion(all_outs,item["logits"][:,1:-2,:])
+            loss = criterion(all_outs,item["logits"][:,:-1,:])
             loss.backward()
             optimizer.step()
             ###################
@@ -169,15 +190,15 @@ def main():
                     for jdx,item in enumerate(dataloader_test):
                         model.encode(item["english"][:,1:-1])
                         all_outs = torch.tensor([],requires_grad=True).to(device)
-                        # for i in range(item["german"].shape[1]-1):
-                        #     out = model(item["german"][:,:i+1])
-                        #     all_outs = torch.cat((all_outs,out),dim=1)
+                        for i in range(item["german"].shape[1]-1):
+                            out = model(item["german"][:,:i+1])
+                            all_outs = torch.cat((all_outs,out),dim=1)
 
-                        all_outs = model(model.encode_out)[:,:]
-                        all_outs = all_outs * item["logit_mask"][:,1:-2,:]
+                        # all_outs = model(model.encode_out)[:,:]
+                        # all_outs = all_outs * item["logit_mask"][:,1:-2,:]
 
                         item["logits"] = item["logits"] * item["logit_mask"]
-                        loss = criterion(all_outs,item["logits"][:,1:-2,:])
+                        loss = criterion(all_outs,item["logits"][:,:-1,:])
                         running_test_loss.append(loss.item())
                         if(jdx==VALIDATE_AMOUNT):
                             break
@@ -192,6 +213,7 @@ def main():
                 print(f"TEST LOSS {avg_test_loss} | EPOCH {epoch}")
                 print("BACK TO TRAINING:")
                 dataset.train()
+                # model.encoder.show_matrix(__file__+'.html')
 
             if(num_steps % SAVE_INTERVAL ==0):
                 torch.save({
