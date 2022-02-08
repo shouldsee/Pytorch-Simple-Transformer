@@ -51,7 +51,11 @@ Some Layers Refer to The Annotated Transformer (Harvard NLP)
 
 
 class StateTransfer(nn.Module):
-    def __init__(self, embed_dim, d_ker, mask=False,CUDA=False):
+    def __init__(self, embed_dim, d_ker, mask=False,CUDA=False,
+    #is_value_embed=False,
+    is_state_transfer = True,
+    #return_attention=True
+    ):
         #### Use Attention to move a location Vector
         super(StateTransfer,self).__init__()
         self.attention = GenericAttention(
@@ -60,6 +64,9 @@ class StateTransfer(nn.Module):
             d_ker = d_ker,
             d_v = 1,
             d_o = 1,
+            is_state_transfer = is_state_transfer,
+            is_value_embed= False,
+            return_attention = True,
             mask=mask,
             CUDA=CUDA
             ### Locatoin Vector is a scalar that can be soft maxed
@@ -69,24 +76,27 @@ class StateTransfer(nn.Module):
         return self.attention(q,k,v)
 
 class SelfAttention(nn.Module):
-    def __init__(self,embed_dim,d_k,d_v,mask=False,CUDA=False):
+    def __init__(self,embed_dim,d_ker,d_v,mask=False,CUDA=False,is_value_embed = True, ):
         super(SelfAttention,self).__init__()
         self.attention = GenericAttention(
             d_q = embed_dim,
             d_k = embed_dim,
             d_v = embed_dim,
-            d_ker = d_k,
-            d_o = d_v)
+            d_ker = d_ker,
+            d_o = d_v,
+            is_value_embed = is_value_embed)
     def forward(self, q,k,v):
         return self.attention(q,k,v)
 
 class GenericAttention(nn.Module):
-    def __init__(self, d_q, d_k, d_ker, d_v, d_o , is_value_embed=True, mask=False,CUDA=False):
+    def __init__(self, d_q, d_k, d_ker, d_v, d_o , is_value_embed, is_state_transfer = False, return_attention = False,mask=False,CUDA=False):
 
     # def __init__(self,embed_dim,d_k,d_v,mask=False,CUDA=False):
         super(GenericAttention,self).__init__()
         # self.embed_value = embed_value
+        self.is_state_transfer = is_state_transfer
         self.is_value_embed = is_value_embed
+        self.return_attention = return_attention
         # self.query_embed = nn.Linear(embed_dim,d_k,bias=False)
         # self.key_embed   = nn.Linear(embed_dim,d_k,bias=False)
         # self.value_embed = nn.Linear(embed_dim,d_v,bias=False)
@@ -119,35 +129,41 @@ class GenericAttention(nn.Module):
         key_transposed = torch.transpose(key,1,2)
         #Get attention weights
         attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
-        # attention_weights = attention_weights/math.sqrt(self.d_k)
         # print(attention_weights.shape)
         attention_weights = attention_weights - 0.5 * torch.sum(torch.square(query),dim=2,keepdim=True)
         attention_weights = attention_weights - 0.5 * torch.transpose(torch.sum(torch.square(key),dim=2,keepdim=True),1,2)
+        attention_weights = attention_weights/math.sqrt(self.d_k)
         if(self.mask==True):
-            #REF : http://peterbloem.nl/blog/transformers
-            indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
-            attention_weights[:, indices[0], indices[1]] = float('-inf')
+            for i in range(attention_weights.shape[1]):
+                attention_weights[:,i,i] = float('-inf')
+            # #REF : http://peterbloem.nl/blog/transformers
+            # indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
+            # attention_weights[:, indices[0], indices[1]] = float('-inf')
         shape0 = attention_weights.shape
-
-        attention_weights = F.softmax(attention_weights,dim=2)
+        if self.is_state_transfer:
+            attention_weights = F.softmax(attention_weights,dim=1)
+        else:
+            attention_weights = F.softmax(attention_weights,dim=2)
+        if self.return_attention:
+            return attention_weights
         # attention_weights = attention_weights *0.
         # attention_weights = torch.exp(attention_weights)
 
         # attention_weights = F.softmax(attention_weights.reshape((shape0[0],-1)), dim=1)
         # attention_weights = attention_weights.reshape(shape0)
         # ss = attention_weights - torch.max(attention_weights,dim=(2,))
-        attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
+        # attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
 
         #Apply attention weights to value
         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
-        attention_weighted_value = self.dropout(attention_weighted_value)
+        # attention_weighted_value = self.dropout(attention_weighted_value)
         return attention_weighted_value
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self,embed_dim,d_k,d_v,num_heads,mask=False,CUDA=False):
+    def __init__(self,embed_dim,d_k,d_v,num_heads,mask=False,CUDA=False,is_value_embed=True):
         super(MultiHeadAttention,self).__init__()
         self.attention_blocks = [
-            SelfAttention(embed_dim,d_k,d_v,mask) for _ in range(num_heads)
+            SelfAttention(embed_dim,d_k,d_v,mask,is_value_embed=is_value_embed) for _ in range(num_heads)
         ]
         [setattr(self,'attention_block_%d'%xi,xxx) for xi,xxx in enumerate(self.attention_blocks)]
         self.norm = LayerNorm(embed_dim)
@@ -160,6 +176,7 @@ class MultiHeadAttention(nn.Module):
             attention_out = torch.cat((attention_out,attention(query,key,value)),dim=2)
         add_and_norm = self.norm(attention_out + residual_x)
         return add_and_norm
+
 
 class LayerNorm(nn.Module):
     "Taken from Annotated Transformer (HarvardNLP)"
@@ -192,9 +209,10 @@ class PositionWiseFeedForward(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self,embed_dim,num_heads,mask=False,CUDA=False):
+    def __init__(self,embed_dim,num_heads,is_value_embed=True,mask=False,CUDA=False):
         super(TransformerBlock,self).__init__()
-        self.multi_head_attention = MultiHeadAttention(embed_dim,embed_dim//num_heads,embed_dim//num_heads,num_heads,mask,CUDA=CUDA)
+        self.multi_head_attention = MultiHeadAttention(embed_dim,embed_dim//num_heads,embed_dim//num_heads,num_heads,mask,CUDA=CUDA,
+        is_value_embed=is_value_embed)
         self.feed_forward = PositionWiseFeedForward(embed_dim,embed_dim)
     def forward(self,query,key,value,residual_x):
         attention_out = self.multi_head_attention(query,key,value,residual_x)

@@ -177,7 +177,9 @@ def main():
             # [1])
             all_outs = all_outs * item["logit_mask"][:,:-1]
             # item["logits"] = item["logits"] * item["logit_mask"]
-
+            # print(repr( dataset.german_vocab_reversed[3]))
+            # print(repr( dataset.german_vocab_reversed[11]))
+            # assert 0
             ###################
 
             ###################
@@ -230,7 +232,8 @@ def main():
                 train_losses.append(avg_loss)
                 print("LABEL: ",dataset.logit_to_sentence(item["logits"][0]))
                 print("===")
-                print("PRED: ",dataset.logit_to_sentence(all_outs[0]))
+                print("PRED: ",(dataset.logit_to_sentence(all_outs[0])))
+                # print("PRED: ",list(dataset.logit_to_sentence(all_outs[0])))
                 print(f"TRAIN LOSS {avg_loss} | EPOCH {epoch}")
                 print(f"TEST LOSS {avg_test_loss} | EPOCH {epoch}")
                 print("BACK TO TRAINING:")
