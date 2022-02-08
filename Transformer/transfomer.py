@@ -7,6 +7,7 @@ from Transformer.sub_layers import (MultiHeadAttention, PositionalEncoding,
 LayerNorm,
 SelfAttention,
 GenericAttention,
+StateTransfer,
 
                         PositionWiseFeedForward, TransformerBlock, VocabLogits,Embeddings)
 
@@ -78,7 +79,6 @@ class PositionalDecoder(nn.Module):
         y = self.norm(y)
         return y
 
-# import matpl
 class Encoder2(nn.Module):
     def __init__(self,embed_dim,num_heads,num_blocks,CUDA=False):
         super(Encoder2, self).__init__()
@@ -90,6 +90,7 @@ class Encoder2(nn.Module):
             )
              for _ in range(num_blocks)
         ]
+        # self.state_transfer_block = StateTransfer(embed_dim, embed_dim, mask=False,CUDA=CUDA)
         [setattr(self,'transformer_block0_%d'%xi,xxx[0]) for xi,xxx in enumerate(self.transformer_blocks)]
         [setattr(self,'transformer_block1_%d'%xi,xxx[1]) for xi,xxx in enumerate(self.transformer_blocks)]
         self.num_blocks = num_blocks
@@ -105,95 +106,24 @@ class Encoder2(nn.Module):
         # y = norm(y)
         # y = torch.zeros((x.shape[0],10,10))        z = torch.
 
+        # lv = torch.zeros(list(x.shape)[:2]+[1])
+        # lv[:,0,:]=1
         for i in range(self.num_blocks):
             ys = []
-            for _,block1 in self.transformer_blocks:
-                y = torch.zeros((x.shape[0], 1, x.shape[2]))
-                y = block1(y,x,x,y)
-                ys.append(y)
+            # for _,block1 in self.transformer_blocks:
+            #     y = torch.zeros((x.shape[0], 1, x.shape[2]))
+            #     y = block1(y,x,x,y)
+            #     ys.append(y)
             block0,block1 = self.transformer_blocks[i]
-            y = torch.cat(ys,dim=1)
-            if i+1==self.num_blocks:
-                x = block0(x,y,y,x)
-            else:
-                x = block0(x,y,y,x)
-#
-        # for block0,block1 in self.transformer_blocks:
-        #     block0,block1 = self.transformer_blocks[0]
-        #     z = torch.cat([y,x],dim=1)        # for i in range(y.shape[1]):
-        # #     y[:,i,i] = 10
-        #
-        #     # import pdb; pdb.set_trace()
-        #     # print()
-        #     # block0 = self.transformer_blocks[0]
-        #     # block0 = block
-        #
-        #     # y = block0(y,z,z,y)
-        #     # x = block1(x,y,y,x)
-        #     x = block0(x,y,y,x)
-        #     y = block1(y,z,z,y)
-        #     # print(x.shape)
-        #     # print(y.shape)
-        #     # print(z.shape)
-        #     # print()
-        #     # z = torch.cat([y,x],dim=1)
-        #     # y = block1(y,z,z,y)
-        #     # z = torch.cat([y,x],dim=1)
-        #     # y = block1(y,z,z,y)
+            # y = torch.cat(ys,dim=1)
+            # if i+1==self.num_blocks:
+            #     x = block0(x,y,y,x)
+            # else:
+            #     x = block0(x,y,y,x)
+
+            x = block0(x,x,x,x)
         return x
 
-    def show_matrix(self,fn):
-        if fn is None:
-            fn = __file__ + '.html'
-        mat1 = self.transformer_blocks[0][1]
-        x = dict  ( mat1.multi_head_attention.attention_block_0.named_parameters())
-        with open(fn,'w') as f:
-            for k,v in x.items():
-                f.write(str(k)+'\n')
-                f.write(str(v.shape))
-                pd.DataFrame(v.detach().numpy()*100).astype(int).to_html(f)
-
-        # pass
-
-class Encoder2(nn.Module):
-    def __init__(self,embed_dim,num_heads,num_blocks,CUDA=False):
-        super(Encoder2, self).__init__()
-        self.transformer_blocks = [
-
-            (
-            TransformerBlock(embed_dim,num_heads,mask=False,CUDA=CUDA),
-            TransformerBlock(embed_dim,num_heads,mask=False,CUDA=CUDA)
-            )
-             for _ in range(num_blocks)
-        ]
-        [setattr(self,'transformer_block0_%d'%xi,xxx[0]) for xi,xxx in enumerate(self.transformer_blocks)]
-        [setattr(self,'transformer_block1_%d'%xi,xxx[1]) for xi,xxx in enumerate(self.transformer_blocks)]
-        self.num_blocks = num_blocks
-        self.positional_encoding = PositionalEncoding(embed_dim)
-        # self.norm = LayerNorm(embed_dim)
-    def forward(self, x):
-        # x = self.positional_encoding(x)
-        # print(y.shape)
-        # for i in range(y.shape[1]):
-        #     y[:,i,i] = 1
-        # norm = transformer_blocks
-        # norm = self.transformer_blocks[0][0].multi_head_attention.norm
-        # y = norm(y)
-        # y = torch.zeros((x.shape[0],10,10))        z = torch.
-
-        for i in range(self.num_blocks):
-            ys = []
-            for _,block1 in self.transformer_blocks:
-                y = torch.zeros((x.shape[0], 1, x.shape[2]))
-                y = block1(y,x,x,y)
-                ys.append(y)
-            block0,block1 = self.transformer_blocks[i]
-            y = torch.cat(ys,dim=1)
-            if i+1==self.num_blocks:
-                x = block0(x,y,y,x)
-            else:
-                x = block0(x,y,y,x)
-        return x
 class Decoder(nn.Module):
     def __init__(self,embed_dim,num_heads,num_blocks,vocab_size,CUDA=False):
         super(Decoder, self).__init__()
@@ -271,15 +201,18 @@ class TransformerTranslatorFeng(nn.Module):
         self.encoder = Encoder2(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.decoder = Decoder(embed_dim,num_heads,num_blocks,output_vocab_size,CUDA=CUDA)
         # self.decoder2 = Encoder2(embed_dim,num_heads,num_blocks,CUDA=CUDA)
-        # self.pdec     = PositionalDecoder(embed_dim, max_context_length, embed_dim)
+        self.pdec     = PositionalDecoder(embed_dim, max_context_length, embed_dim)
         # self.embedding_pe_enc = nn.Linear(embed_dim+self.pdec.pe_len,embed_dim)
         self.encoded = False
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
         self.encode_out = None
     def encode(self,input_sequence):
-        x=  embedding = self.embedding(input_sequence).to(self.device)
-        # bpe = BinaryPositionEncoding([len(x), self.pdec.l],1)[:,:x.shape[1]]
-        # x = torch.cat([x,bpe],dim=2)
+        x=  embedding = self.embedding(input_sequence).to(self.device)[:,:,:]
+
+        x = x[:,:,:-self.pdec.pe_len]
+        bpe = BinaryPositionEncoding([len(x), self.pdec.l],1)[:,:x.shape[1]]
+        x = torch.cat([x,bpe],dim=2)
+
         # x = self.embedding_pe_enc(x)
 
         self.encode_out = self.encoder(x)
@@ -289,8 +222,13 @@ class TransformerTranslatorFeng(nn.Module):
             print("ERROR::TransformerTranslator:: MUST ENCODE FIRST.")
             return output_sequence
         else:
-            y = self.embedding2(output_sequence)
-            x =  self.decoder(self.encode_out, y)
+            x = self.embedding2(output_sequence)
+
+            x = x[:,:,:-self.pdec.pe_len]
+            bpe = BinaryPositionEncoding([len(x), self.pdec.l],1)[:,:x.shape[1]]
+            x = torch.cat([x,bpe],dim=2)
+
+            x =  self.decoder(self.encode_out, x)
             # x =  self.pdec(x)
             return (x)
 

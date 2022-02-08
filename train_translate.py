@@ -14,7 +14,8 @@ import os
 """
 Hyperparameters
 """
-CUDA = False
+CUDA = True
+CUDA = 1
 PRINT_INTERVAL = 5000
 VALIDATE_AMOUNT = 10
 
@@ -90,7 +91,6 @@ if '--LOAD' in sys.argv:
     LOAD = int(LOAD)
 
 def main():
-
     if(LOAD!=-1):
         checkpoint   = torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
         test_losses  = checkpoint["test_losses"]
@@ -146,15 +146,29 @@ def main():
             ###################
 
             ###################
-            #Output German, One Token At A Time
+            # #Output German, One Token At A Time
+            # all_outs = torch.tensor([],requires_grad=True).to(device)
+            # # print(item["german"].shape[1])
+            # # all_outs = model(model.encode_out)[:,:]
+            # # item["german"].shape[1]-1]
+            # for i in range(item["german"].shape[1]-1):
+            #     out = model(item["german"][:,:i+1])
+            #     all_outs = torch.cat((all_outs,out),dim=1)
+            # ###################
+            # output_vocab_size = german_vocab_len
+
+            g = item["german"].shape
+            x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
             all_outs = torch.tensor([],requires_grad=True).to(device)
-            # print(item["german"].shape[1])
-            # all_outs = model(model.encode_out)[:,:]
-            # item["german"].shape[1]-1]
             for i in range(item["german"].shape[1]-1):
-                out = model(item["german"][:,:i+1])
+                xx = torch.zeros( [g[0],g[1], ],dtype=torch.long ).to(device)
+                out = model(x)
+                xx[:,i:i+1] = item["german"][:,i:i+1]
+                # xx[:,i:i+1] = out.argmax(axis=-1)
+                x = x+xx
+                # x[:,i:i+1] = x[:,i:i+1] + out.argmax(axis=-1)
                 all_outs = torch.cat((all_outs,out),dim=1)
-            ###################
+
 
             ###################
             #Mask Out Extra Padded Tokens In The End(Optional)
@@ -189,9 +203,17 @@ def main():
                 with torch.no_grad():
                     for jdx,item in enumerate(dataloader_test):
                         model.encode(item["english"][:,1:-1])
+                        g = item["german"].shape
+                        x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
                         all_outs = torch.tensor([],requires_grad=True).to(device)
                         for i in range(item["german"].shape[1]-1):
-                            out = model(item["german"][:,:i+1])
+                            out = model(x)
+
+                            xx = torch.zeros( [g[0],g[1], ],dtype=torch.long ).to(device)
+                            out = model(x)
+                            # xx[:,i:i+1] = item["german"][:,i:i+1]
+                            xx[:,i:i+1] = out.argmax(axis=-1)
+                            x = x+xx
                             all_outs = torch.cat((all_outs,out),dim=1)
 
                         # all_outs = model(model.encode_out)[:,:]
