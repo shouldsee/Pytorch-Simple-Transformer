@@ -130,7 +130,7 @@ class Encoder2(nn.Module):
         # print((lv[0,:,0].cpu().detach().numpy()*100).astype(int))
         # print(lv.shape)
         # for i in range(3):
-        print()
+        # print()
         # for block0,block1 in self.transformer_blocks:
         for i in range(5):
             ys = []
@@ -144,7 +144,6 @@ class Encoder2(nn.Module):
             #     x = block0(x,y,y,x)
             # else:
             #     x = block0(x,y,y,x)
-            # lv0 = lv
             # nk_vec =
 
             # key = self.lin1(past_v.reshape([len(x),1,self.n_past*self.embed_dim]))
@@ -158,21 +157,19 @@ class Encoder2(nn.Module):
 
             # print(lv.sum(dim=1)[0])
             # print((lv1[0,:,0].cpu().detach().numpy()*100).astype(int))
-            [ print('{:02d}'.format(xx)if xx>0 else '  ',end=' ')
-            for xx in  (
-            lv[0,:,0].cpu().detach().numpy()*100).astype(int).tolist() ]
-            print()
+            # [ print('{:02d}'.format(xx)if xx>0 else '  ',end=' ')
+            # for xx in  (
+            # lv[0,:,0].cpu().detach().numpy()*100).astype(int).tolist() ]
             # print()
-            # print(lv.shape)
             # dx = self.lin1(past_v.reshape([x.shape[0],1,self.n_p-0.2219,ast*self.embed_dim]))
             # dx =
             # key = self.lin2(past_v_extra.reshape((len(x),1,-1))).reshape((len(x),self.n_past+1,self.embed_dim))
             # past_v_extra = past_v_extra + key
             # past_v_extra = self.norm1(past_v_extra)
             layer = self.attention_block_list[0]
-            print(past_v_extra[0][:,0].round())
+            # print(past_v_extra[0][:,0].round())
             past_v_extra =layer( past_v_extra,  past_v_extra, past_v_extra,)
-            print(past_v_extra[0][:,0].round())
+            # print(past_v_extra[0][:,0].round())
             past_v_extra = self.norm1(past_v_extra)
             lv = self.state_transfer_block(past_v_extra[:,1:2,:],x,0.)
             lv = torch.transpose(lv,1,2)
@@ -181,9 +178,8 @@ class Encoder2(nn.Module):
             # past_v_extra)
             past_v = past_v_extra[:,2:,:]
             dx = past_v[:,0:1,:]
-        print(past_v_extra[0][:,0:5].round())
-            # x = x*(1-lv) + dx*lv
-        print()
+        # print(past_v_extra[0][:,0:5].round())
+        # print()
         # print(past_v)
         # torch.cat(past_)
         return past_v_extra[:,2:]
@@ -204,7 +200,7 @@ class Decoder(nn.Module):
         # print(z[0].cpu().detach().numpy().astype(int))
         z = torch.cat([encoder_outs,x],dim=1)
         vv = torch.zeros((len(x),1,x.shape[2]))
-        vv[:,:,2]=1
+        vv[:,:,-1]=1
 
         for block in self.transformer_blocks[:-1]:
             # z = self.transformer_blocks[0]
@@ -271,6 +267,156 @@ class DecoderOld(nn.Module):
 #             embedding = self.embedding(output_sequence)
 #             return self.decoder(self.encode_out,embedding)
 
+class BasicRNN(nn.Module):
+    def __init__(self, embed_dim, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(BasicRNN, self).__init__()
+        self.hidden_dim = embed_dim
+        self.embed_dim = embed_dim
+        self.embedding = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+        self.transfer = nn.Linear(embed_dim,embed_dim)
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        # self.decoder_transfer = nn.Linear(embed_dim*2,embed_dim,)
+        self.decoder_transfer = nn.Linear(embed_dim, embed_dim,)
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        z = torch.zeros_like(x[:,0:1,:])
+        for i in range(x.shape[1]):
+            z = z + self.transfer(z + x[:,i:i+1,:])
+            z = self.norm1(z)
+        return z
+
+    # def
+    def forward(self, hidden_state, output_sequence):
+        x = self.embedding_out(output_sequence).to(self.device)
+        k = hidden_state
+        z = torch.zeros([x.shape[0],1,x.shape[2]])
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            z = z + self.decoder_transfer(z)
+            # z = self.decoder_transfer(torch.cat([z,k],dim=2)) + z
+            z = self.norm2(z)
+        y = self.vocab(z)
+        return z,y
+
+class MixtureRNN(nn.Module):
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(MixtureRNN, self).__init__()
+        self.hidden_dim = embed_dim
+        self.embed_dim = embed_dim
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+        self.transfer = nn.Linear(embed_dim,embed_dim)
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_transfer = nn.Linear(embed_dim*2,embed_dim,)
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        z = torch.zeros_like(x[:,0:1,:])
+        mover = self.encoder_mover.weight
+        mover = (z+1)*mover[None,:,:]
+        # mover = torch.ones_like(x[:,0:1,:])
+        # c = torch.zeros_like(x[:,0:1,:])
+        # z =
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            g  = torch.cat([z, mover,],dim=1)
+            dg =  self.encoder_attention(g,g,g)
+            z = z + dg[:,0:1]
+            z = self.norm1(z)
+
+        return z
+        # return z
+        # pass
+    # def
+    def forward(self, hidden_state, output_sequence):
+        x = self.embedding_out(output_sequence).to(self.device)
+        # k = hidden_state
+        z = hidden_state
+        # z = torch.zeros([x.shape[0],1,x.shape[2]])
+
+        norm = self.norm2
+        att = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = (z+1)*mover[None,:,:]
+
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            g  = torch.cat([z, mover,],dim=1)
+            dg = att(g,g,g)
+            z = z + dg[:,0:1]
+            z = norm(z)
+
+        y = self.vocab(z)
+        return z,y
+
+class ExtendedMixtureRNN(nn.Module):
+    def __init__(self, embed_dim, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(ExtendedMixtureRNN, self).__init__()
+        self.hidden_dim = embed_dim
+        self.embed_dim = embed_dim
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+        self.transfer = nn.Linear(embed_dim,embed_dim)
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_transfer = nn.Linear(embed_dim*2,embed_dim,)
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        # z = torch.zeros_like(x[:,0:5,:])
+        c = torch.zeros_like(x[:,0:1,:])
+
+        for i in range(x.shape[1]):
+            x[:,:,0] = 1   ## 0 is 1 for input
+            z[:,:,0] = 0
+
+            z[:,:,1] = 0
+            x[:,:,1] = 0
+            c[:,:,:] = 0   ## 1 is 1 for context
+            c[:,:,1] = 1
+
+            g = torch.cat([z,c,x],dim=1)
+            dg =  self.encoder_attention(g,g,g)
+            g = g + dg
+            g = self.norm1(g)
+
+        return z
+        # return z
+        # pass
+    # def
+    def forward(self, hidden_state, output_sequence):
+        x = self.embedding_out(output_sequence).to(self.device)
+
+        k = hidden_state
+        z = torch.zeros([x.shape[0],1,x.shape[2]])
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            z = self.decoder_transfer(torch.cat([z,k],dim=2)) + z
+            # [:,:,self.embed_dim]
+            z = self.norm2(z)
+        y = self.vocab(z)
+        return z,y
 
 class TransformerTranslatorFeng(nn.Module):
     def __init__(self,embed_dim,num_blocks,num_heads,vocab_size,
@@ -287,6 +433,7 @@ class TransformerTranslatorFeng(nn.Module):
         self.encoded = False
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
         self.encode_out = None
+
     def encode(self,input_sequence):
         x=  embedding = self.embedding(input_sequence).to(self.device)[:,:,:]
 
@@ -295,11 +442,11 @@ class TransformerTranslatorFeng(nn.Module):
         x = torch.cat([x,bpe],dim=2)
 
         # x = self.embedding_pe_enc(x)
-
-        self.encode_out = self.encoder(x)
+        self.encode_out = z = self.encoder(x)
         self.encoded = True
+        return z
 
-    def forward(self, output_sequence):
+    def forward(self, hidden,output_sequence):
         if(self.encoded==False):
             print("ERROR::TransformerTranslator:: MUST ENCODE FIRST.")
             return output_sequence
@@ -312,7 +459,7 @@ class TransformerTranslatorFeng(nn.Module):
 
             x =  self.decoder(self.encode_out, x)
             # x =  self.pdec(x)
-            return (x)
+            return (hidden, x)
 
             # embedding = self.embedding2(output_sequence)
             # return self.decoder(self.encode_out,embedding)
