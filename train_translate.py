@@ -21,7 +21,7 @@ VALIDATE_AMOUNT = 10
 
 batch_size = 128
 embed_dim = 64
-num_blocks = 6
+num_blocks = 12
 num_heads = 1 #Must be factor of token size
 max_context_length = 1000
 
@@ -49,12 +49,22 @@ Model
 torch.set_default_tensor_type(torch.cuda.FloatTensor if CUDA else torch.FloatTensor)
 from Transformer.transfomer import BasicRNN
 from Transformer.transfomer import MixtureRNN
-# model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,
-# max_context_length=max_context_length,
-# CUDA=CUDA).to(device)
+from Transformer.transfomer import DynamicMixtureRNN
+from Transformer.transfomer import JointMixtureRNN
+from Transformer.transfomer import SecondOrderMixtureRNN
+from Transformer.transfomer import AnchorMixtureRNN
+from Transformer.transfomer import BeamAnchorMixtureRNN
+
+from Transformer.transfomer import AnchorOnlyMixtureRNN
+# model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model =  BasicRNN(embed_dim, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
-model = MixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = SecondOrderMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = DynamicMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = MixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = AnchorOnlyMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+model = BeamAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
@@ -66,7 +76,7 @@ def sqrt_sum( output_log , target):
     loss = -torch.mean(loss)
     #(output-target*2)**3)
     return loss
-    
+
 criterion = sqrt_sum
 
 optimizer = torch.optim.Adam( model.parameters(), lr=learning_rate)
@@ -98,6 +108,7 @@ else:
     LOAD = -1
 
 
+STRICT_LOAD = '--nostrict' not in sys.argv
 def main():
     if(LOAD!=-1):
         checkpoint   = torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
@@ -116,7 +127,7 @@ def main():
         x = xx
         # x = {k:v for k,v in x.items() if k in dict(model.named_parameters())}
 
-        model.load_state_dict(x)
+        model.load_state_dict(x,strict=STRICT_LOAD)
         # optimizer.load_state_dict(checkpoint["optimizer"])
     else:
         test_losses = []
@@ -134,6 +145,7 @@ def main():
         """
 
         # print(model.state_dict().keys())
+        print(model.__class__.__name__)
         for idx,item in enumerate(tqdm(dataloader)):
             """
             ============================================================
@@ -151,34 +163,26 @@ def main():
             ###################
             #Encode English Sentence
             # perm = np.random.permutation(item["english"][:,1:-1].shape[1])
-            hidden = model.encode(item["english"][:,1:-1][:,:])
+            hidden = model.encode(item["english"][:,:][:,:])
             # print(item["german"][:,1:-1][:1])
             ###################
 
-            ###################
-            # #Output German, One Token At A Time
-            # all_outs = torch.tensor([],requires_grad=True).to(device)
-            # # print(item["german"].shape[1])
-            # # all_outs = model(model.encode_out)[:,:]
-            # # item["german"].shape[1]-1]
-            # for i in range(item["german"].shape[1]-1):
-            #     out = model(item["german"][:,:i+1])
-            #     all_outs = torch.cat((all_outs,out),dim=1)
-            # ###################
-            # output_vocab_size = german_vocab_len
 
-            # print(item['german'][0].shape)
-            # print(item['logits'][0].shape)
-            # log = (item['logits'][0])
-            # print([dataset.german_vocab_reversed[i] for i in item['german'][0]])
-            # print([dataset.german_vocab_reversed[i] for i in item['logits'][0].argmax(axis=1) ])
-
-            g = item["german"].shape
+            g = item['german'].shape
             x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
             all_outs = torch.tensor([],requires_grad=True).to(device)
             for i in range(item["german"].shape[1]-1):
                 xx = torch.zeros( [g[0],g[1], ],dtype=torch.long ).to(device)
-                hidden,out = model(hidden,  item["german"][:,i-1:i])
+
+                if '--greedy' in sys.argv:
+                    hidden,out = model(hidden,  x[:,i-1:i])
+                    y = out.argmax(axis=-1)
+                    xx[:,i:i+1] = y
+                    x = x+xx
+                else:
+                    hidden,out = model(hidden,  item["german"][:,i-1:i])
+
+                # hidden,out = model(hidden,  item["german"][:,i-1:i])
                 # xx[:,i:i+1] = item["german"][:,i:i+1]
                 # xx[:,i:i+1] = out.argmax(axis=-1)
                 # x = x+xx
@@ -193,9 +197,7 @@ def main():
             # [1])
             all_outs = all_outs * item["logit_mask"][:,:-1]
             # item["logits"] = item["logits"] * item["logit_mask"]
-            # print(repr( dataset.german_vocab_reversed[3]))
-            # print(repr( dataset.german_vocab_reversed[11]))
-            # assert 0
+
             ###################
 
             ###################
@@ -214,13 +216,59 @@ def main():
                 """
                 Validation LOOP
                 """
+
                 all_outs.detach().cpu()
                 item["logits"].detach().cpu()
                 dataset.test()
                 model.eval()
                 with torch.no_grad():
+                    if '--debug' in sys.argv:
+                        sents =[]
+                        sents += ['Herr Präsident und Herr Kolleginnen , Herr Kollegen' ] #+ ' <start>'*30
+                        sents += ['Herr Herr Herr Herr'  + ' <start>'*30]
+                        sents += ['Herr Präsident'  + ' <start>'*30]
+                        # sents += ['Herr Präsident , Herr Kollegen' ] #+ ' <start>'*30
+
+                        sents = [
+                        torch.tensor([dataset.english_vocab_reversed.index(xx) for xx in sent.replace(' ','| |').split('|')],dtype=torch.long).cpu()
+                        for sent in sents]
+                        # to(device)
+                        x = dataset.english_sentences_test[0:3] + sents
+                        # [tok]
+                        x = [xx[:13] for xx in x]
+                        # x = torch.cat(x,dim=0).to(device)
+                        x = torch.stack(x,dim=0)[:,:].to(device)
+                        print([dataset.english_vocab_reversed[xx] for xx in x.cpu().detach().numpy().ravel()])
+
+
+                        # pirnt(x.shape)
+                        x0 = x
+                        hidden = model.encode(x)
+                        g = x.shape
+                        # print((hidden[1][:,:,:3].T.cpu().numpy()*10).astype(int))
+                        x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
+                        all_outs = torch.tensor([],requires_grad=True).to(device)
+
+                        # last = x[:,0:1,:]
+                        # last = torch.zeros_like(hidden_dim,)
+                        MAXVAL = 0
+                        xx = torch.zeros( [ g[0],g[1], ],dtype=torch.long ).to(device)
+                        for i in range(20):
+                            xx = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
+                            hidden,out = model(hidden,  x[:,i-1:i])
+                            y = out.argmax(axis=-1)
+                            xx[:,i:i+1] = y
+                            x = x+xx
+                            all_outs = torch.cat((all_outs,out),dim=1)
+                        # from pprint import pprint
+                        for vidx in range(len(x0)):
+                            print('==============')
+                            print('INPUT:'+ ','.join([dataset.english_vocab_reversed[xx].__repr__() for xx in x0[vidx].cpu().detach().numpy().ravel()]))
+                            print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
+                            list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
+
                     for jdx,item in enumerate(dataloader_test):
-                        hidden = model.encode(item["english"][:,1:-1])
+                        hidden = model.encode(item["english"][:,:])
                         g = item["german"].shape
                         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
                         all_outs = torch.tensor([],requires_grad=True).to(device)
@@ -232,14 +280,16 @@ def main():
                         for i in range(item["german"].shape[1]-1):
                             xx = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
 
-                            hidden,out = model(hidden,  x[:,i-1:i])
-                            # hidden,out = model(hidden,  item["german"][:,i-1:i])
+                            if '--greedy' in sys.argv:
+                                hidden,out = model(hidden,  x[:,i-1:i])
+                                y = out.argmax(axis=-1)
+                                xx[:,i:i+1] = y
+                                x = x+xx
+                            else:
+                                hidden,out = model(hidden,  item["german"][:,i-1:i])
                             # item["german"][:,i-1:i])
                                             # hidden,out = model(hidden, x)
-                            y = out.argmax(axis=-1)
                             # MAXVAL = max(MAXVAL,int(y.max()))
-                            xx[:,i:i+1] = y
-                            x = x+xx
                             all_outs = torch.cat((all_outs,out),dim=1)
                         # print(MAXVAL,dataset.german_vocab_len)
                         # all_outs = model(model.encode_out)[:,:]
@@ -250,6 +300,7 @@ def main():
                         running_test_loss.append(loss.item())
                         if(jdx==VALIDATE_AMOUNT):
                             break
+
                 avg_test_loss = np.array(running_test_loss).mean()
                 test_losses.append(avg_test_loss)
                 avg_loss = np.array(running_loss).mean()

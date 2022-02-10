@@ -245,27 +245,7 @@ class DecoderOld(nn.Module):
                       residual_x=output_seq_attention_out)
         return self.vocab_logits(x)
 
-#
-# class TransformerTranslator(nn.Module):
-#     def __init__(self,embed_dim,num_blocks,num_heads,vocab_size,CUDA=False):
-#         super(TransformerTranslator,self).__init__()
-#         self.embedding = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
-#         self.encoder = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
-#         self.decoder = Decoder(embed_dim,num_heads,num_blocks,vocab_size,CUDA=CUDA)
-#         self.decoder2 = Encoder(embed_dim,num_heads,num_blocks,CUDA=CUDA)
-#         self.encoded = False
-#         self.device = torch.device('cuda:0' if CUDA else 'cpu')
-#     def encode(self,input_sequence):
-#         embedding = self.embedding(input_sequence).to(self.device)
-#         self.encode_out = self.encoder(embedding)
-#         self.encoded = True
-#     def forward(self,output_sequence):
-#         if(self.encoded==False):
-#             print("ERROR::TransformerTranslator:: MUST ENCODE FIRST.")
-#             return output_sequence
-#         else:
-#             embedding = self.embedding(output_sequence)
-#             return self.decoder(self.encode_out,embedding)
+
 
 class BasicRNN(nn.Module):
     def __init__(self, embed_dim, vocab_size,output_vocab_size,max_context_length,CUDA=False):
@@ -305,14 +285,17 @@ class BasicRNN(nn.Module):
         return z,y
 
 class MixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    '''
     def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
         super(MixtureRNN, self).__init__()
-        self.hidden_dim = embed_dim
         self.embed_dim = embed_dim
+
         self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
         self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
         self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
-        self.transfer = nn.Linear(embed_dim,embed_dim)
+
         self.device = torch.device('cuda:0' if CUDA else 'cpu')
         self.encoded = False
 
@@ -321,7 +304,7 @@ class MixtureRNN(nn.Module):
 
         self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
         self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
-        self.decoder_transfer = nn.Linear(embed_dim*2,embed_dim,)
+
         self.norm1 = LayerNorm(embed_dim)
         self.norm2 = LayerNorm(embed_dim)
 
@@ -330,30 +313,514 @@ class MixtureRNN(nn.Module):
         z = torch.zeros_like(x[:,0:1,:])
         mover = self.encoder_mover.weight
         mover = (z+1)*mover[None,:,:]
-        # mover = torch.ones_like(x[:,0:1,:])
-        # c = torch.zeros_like(x[:,0:1,:])
-        # z =
         for i in range(x.shape[1]):
             z = z + x[:,i:i+1,:]
             g  = torch.cat([z, mover,],dim=1)
             dg =  self.encoder_attention(g,g,g)
             z = z + dg[:,0:1]
             z = self.norm1(z)
-
         return z
-        # return z
-        # pass
-    # def
+
     def forward(self, hidden_state, output_sequence):
         x = self.embedding_out(output_sequence).to(self.device)
-        # k = hidden_state
         z = hidden_state
-        # z = torch.zeros([x.shape[0],1,x.shape[2]])
+        norm = self.norm2
+        att  = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = (torch.zeros_like(z)+1)*mover[None,:,:]
 
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            g  = torch.cat([z, mover,],dim=1)
+            dg = att(g,g,g)
+            z = z + dg[:,0:1]
+            z = norm(z)
+        y = self.vocab(z)
+        return z,y
+
+class AnchorMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    Anchors value will be updated if particular phase space is visited, to store memory
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(AnchorMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        anchor_count = mixture_count
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.encoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+        self.encoder_anchor_attention = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_reader = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+        # self.norm3 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device);
+        xs = x.shape
+        z = torch.zeros([xs[0],1,xs[2]])                 ### init at origin
+        mover = self.encoder_mover.weight                ### load dynamics
+        mover = (z+1)*mover[None,:,:]                    ### reshaping
+        mover_att    = self.encoder_attention
+        anchor_key   = self.encoder_anchor_key.weight
+        anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_value = 0*anchor_key
+        anchor_att   = self.encoder_anchor_attention
+        norm = self.norm1
+        anchor_norm  =self.norm1
+        # anchor_norm  =self.norm3
+        for i in range(x.shape[1]):
+            # print((anchor_value[0,:,:4]*10).cpu().detach().numpy().astype('int'))
+            # print()
+            z  =  z + x[:,i:i+1,:]
+            g  =  torch.cat([z, mover,],dim=1)
+            dg =  mover_att(g,g,g)
+            z  = z + dg[:,0:1]
+            z  = norm(z)
+            anchor_att_ret = anchor_att(anchor_key,z,z)
+            # anchor_att_ret = anchor_att_ret - torch.mean(anchor_att_ret,dim=1,keepdims=True)
+            # anchor_value  = anchor_value + anchor_att_ret *z
+            # anchor_value  = norm(anchor_value)
+            anchor_value  = (1-anchor_att_ret) * anchor_value + anchor_att_ret *z
+            anchor_value  = anchor_norm(anchor_value)
+            # , anchor_att_ret.sum(axis=1)[0])
+
+        return (0*z,anchor_value)
+
+    def forward(self, hidden_state, output_sequence):
+
+        x = self.embedding_out(output_sequence).to(self.device)
+        z, anchor_value = hidden_state
+        norm = self.norm2
+        att  = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = (torch.zeros_like(z)+1)*mover[None,:,:]
+
+        # anchor_key   = self.decoder_anchor_key.weight
+        # anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_reader = self.decoder_anchor_reader
+
+        for i in range(x.shape[1]):
+            z  = z*1 + 1*x[:,i:i+1,:]
+            # torch.cat([z,anchor_value])
+
+            dg2 = anchor_reader(z, anchor_value, anchor_value)
+            z = z + dg2
+            z = norm(z)
+
+        # y = self.decoder_anchor_key(z)
+        # zoff = self.encoder_anchor_key.weight[None,0:1,:]
+
+        # y = torch.matmul( z,self.embedding_out.lut.weight.T)
+        # y =
+        # y = F.log_softmax(y,dim=2)
+        y = self.vocab(z)
+
+        #### cut the hidden_state z here
+        return (  z,anchor_value),y
+
+
+
+class BeamAnchorMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    Anchors value will be updated if particular phase space is visited, to store memory
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(BeamAnchorMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+        self.mixture_count = mixture_count
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        anchor_count = mixture_count
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.encoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+        self.encoder_anchor_attention = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_reader = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_anchor_attention_log = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=False,mask=False,CUDA=CUDA,
+        return_log=True,
+        )
+        self.decoder_anchor_disp = nn.Linear(embed_dim,embed_dim)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+        # self.norm3 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device);
+        xs = x.shape
+        z = torch.zeros([xs[0],1,xs[2]])                 ### init at origin
+        mover = self.encoder_mover.weight                ### load dynamics
+        mover = (z+1)*mover[None,:,:]                    ### reshaping
+        mover_att    = self.encoder_attention
+        anchor_key   = self.encoder_anchor_key.weight
+        anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_value = 0*anchor_key
+        anchor_att   = self.encoder_anchor_attention
+        norm = self.norm1
+        anchor_norm  =self.norm1
+        # anchor_norm  =self.norm3
+        for i in range(x.shape[1]):
+            # print((anchor_value[0,:,:4]*10).cpu().detach().numpy().astype('int'))
+            # print()
+            z  =  z + x[:,i:i+1,:]
+            g  =  torch.cat([z, mover,],dim=1)
+            dg =  mover_att(g,g,g)
+            z  = z + dg[:,0:1]
+            z  = norm(z)
+            anchor_att_ret = anchor_att(anchor_key,z,z)
+            # anchor_att_ret = anchor_att_ret - torch.mean(anchor_att_ret,dim=1,keepdims=True)
+            # anchor_value  = anchor_value + anchor_att_ret *z
+            # anchor_value  = norm(anchor_value)
+            anchor_value  = (1-anchor_att_ret) * anchor_value + anchor_att_ret *z
+            anchor_value  = anchor_norm(anchor_value)
+            # , anchor_att_ret.sum(axis=1)[0])
+
+        return ( 0*z , anchor_value, 0.)
+
+    def forward(self, hidden_state, output_sequence):
+        topk = 20
+
+        x = self.embedding_out(output_sequence).to(self.device)
+        xs = x.shape
+
+        z, anchor_value,anchor_att_ret = hidden_state
+        norm = self.norm2
+        att  = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = torch.zeros([xs[0], 1, xs[2]])+mover[None,:,:]
+
+        anchor_att_log   = self.decoder_anchor_attention_log
+        anchor_reader = self.decoder_anchor_reader
+
+        anchor_att_ret = torch.zeros([xs[0],topk,1]) + anchor_att_ret
+        z = torch.zeros([xs[0], topk, xs[2]]) + z
+
+        nextk = self.mixture_count
+
+        print = lambda *x:None
+        for i in range(x.shape[1]):
+            z  = z*1 + 1*x[:,i:i+1,:]
+            # torch.cat([z,anchor_value])
+
+            dg2 = anchor_reader(z, anchor_value, anchor_value)
+
+
+            anchor_att_ret_new = anchor_att_log(anchor_value,z,anchor_value)
+            anchor_value_disp = self.decoder_anchor_disp(anchor_value)
+
+            print(anchor_att_ret_new.exp().sum(dim=2))
+            # print(anchor_att_ret_new.T.shape)
+            print(anchor_value_disp.shape)
+            print(anchor_att_ret.shape)
+            print(anchor_att_ret_new.shape)
+            print('[z]',z.shape)
+            # print(dg2.shape)
+            anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
+            print(anchor_value_cross.shape)
+
+            val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
+            znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
+            znew  = znew.reshape((x.size(0),-1, self.embed_dim))
+
+            znew = znew[torch.arange(z.size(0))[:,None]+torch.zeros_like(idx), idx,:]
+            anchor_att_ret =  val[:,:,None]
+
+            z = znew
+            print(znew.shape)
+            print(idx.shape,val.shape)
+            print(idx[0],val[0])
+            print(idx.shape)
+            print(znew.shape)
+            # torch.topk(anchor_value_cross)
+            # print(z[0,:,0])
+
+            z = z + 0*dg2
+            z = norm(z)
+
+
+        y = self.vocab(z)[:,0:1,:]
+        #### cut the hidden_state z here
+        return (  z,anchor_value, anchor_att_ret),y
+
+class AnchorOnlyMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    Anchors value will be updated if particular phase space is visited, to store memory
+    The original RNN dynamics is removed
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(AnchorOnlyMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        anchor_count = mixture_count
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,) ## [DEL]
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.encoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+        self.encoder_anchor_attention = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_reader = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+
+        self.decoder_anchor_attention = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA)
+
+
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+        self.norm3 = LayerNorm(embed_dim)
+
+        # self.norm3 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device);
+        xs = x.shape
+        z = torch.zeros([xs[0],1,xs[2]])                 ### init at origin
+
+        anchor_key   = self.encoder_anchor_key.weight
+        anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_value = 0*anchor_key
+        anchor_att   = self.encoder_anchor_attention
+        norm = self.norm1
+        anchor_norm  =self.norm1
+        mover_att    = self.encoder_attention
+        # anchor_norm  =self.norm3
+        for i in range(x.shape[1]):
+            # print((anchor_value[0,:,:4]*10).cpu().detach().numpy().astype('int'))
+            # print()
+            z  =  z + x[:,i:i+1,:]
+            z  = norm(z)
+            anchor_att_ret = anchor_att(anchor_key,z,z)
+            # anchor_att_ret = anchor_att_ret - torch.mean(anchor_att_ret,dim=1,keepdims=True)
+            # anchor_value  = anchor_value + anchor_att_ret *z
+            # anchor_value  = norm(anchor_value)
+            anchor_value  = (1-anchor_att_ret) * anchor_value + anchor_att_ret *z
+            anchor_value  = anchor_norm(anchor_value)
+            # anchor_value  = anchor_value + mover_att(anchor_value,anchor_value,anchor_value)
+            # anchor_value  = anchor_norm(anchor_value)
+            # , anchor_att_ret.sum(axis=1)[0])
+
+        return (z,anchor_value,0.)
+
+    def forward(self, hidden_state, output_sequence):
+
+        x = self.embedding_out(output_sequence).to(self.device)
+        z, anchor_value,anchor_value_ximg = hidden_state
+        norm = self.norm2
+        att  = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = (torch.zeros_like(z)+1)*mover[None,:,:]
+        # anchor_key   = self.decoder_anchor_key.weight
+        # anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_reader = self.decoder_anchor_reader
+
+        anchor_att   = self.decoder_anchor_attention
+        anchor_key_ximg   = self.decoder_anchor_key.weight
+        anchor_key_ximg   = (z*0+1)*anchor_key_ximg[None,:,:]
+        anchor_value_ximg = anchor_value_ximg + 0*anchor_key_ximg
+        anchor_norm  =self.norm3
+
+        for i in range(x.shape[1]):
+
+            ########## we need to estimate the
+            xc = 1*x[:,i:i+1,:]
+
+            # z =  1* 0.333 * z + 0*0.333 *xc + 1*0.333 * ximg
+            # z  = 0.3 * norm(z) + 0.7*  norm(xc)
+
+            dg2 = anchor_reader(z, anchor_value, anchor_value)
+            ### anchor is a read-only memory here and shall not be varied
+
+            ximg = anchor_reader(z, anchor_key_ximg, anchor_value_ximg)
+
+            anchor_att_ret = anchor_att(anchor_key_ximg,z,z)
+            anchor_value_ximg  = (1-anchor_att_ret) * anchor_value_ximg + anchor_att_ret *z
+            anchor_value_ximg  = anchor_norm(anchor_value_ximg)
+
+
+            # g  = torch.cat([z, mover,],dim=1)
+            # dg  = att(g[:,0:1],g,g)
+
+            z = z + dg2 + 0*ximg #+ 0.*dg
+            z = norm(z)
+
+        y = self.vocab(z)
+        return (z,anchor_value,anchor_value_ximg),y
+
+
+
+class DynamicMixtureRNN(nn.Module):
+    '''
+    E50 T84 V90
+    no better than SOMRNN
+    Apply an enriched dynamics by splitting the phase space into different regions
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(DynamicMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        z = torch.zeros_like(x[:,0:1,:])
+        att   = self.encoder_attention
+        mover = self.encoder_mover.weight
+        mover = (z+1)*mover[None,:,:]
+        norm = self.norm1
+
+        g    = torch.cat([z, mover,],dim=1)
+        for i in range(x.shape[1]):
+            z    = z + x[:,i:i+1,:]
+            g    = torch.cat([z, mover,],dim=1)
+            dg   = att(g,g,g)
+            g    = norm(g+dg)
+            z    = g[:,:1]
+            mover= g[:,1:]
+        return g
+
+    def forward(self, hidden_state, output_sequence):
+        x     = self.embedding_out(output_sequence).to(self.device)
+        # z     = hidden_state
+        xs    = x.shape
+        z     = torch.zeros([xs[0],1,xs[2]])
+        norm  = self.norm2
+        att   = self.decoder_attention
+        att2  = self.decoder_attention
+        mover = self.decoder_mover.weight
+        # mover = self.decoder_mover.weight
+        # mover = (torch.ones_like(z[:,0:1])+1)*mover[None,:,:]
+        mover = (torch.ones_like(z[:,0:1]))*mover[None,:,:]
+
+        mover = torch.cat([ hidden_state[:,1:], mover,],dim=1)
+        z     = hidden_state[:,:1]
+        g     = torch.cat([ z, mover,],dim=1)
+        for i in range(x.shape[1]):
+            z    = z + x[:,i:i+1,:]
+            g    = torch.cat([z, mover,],dim=1)
+            dg   = att(g,g,g)
+
+            dg2  = att2(g,g,g)
+            g    = norm(g+dg+dg2)
+            z    = g[:,:1]
+            mover= g[:,1:]
+
+        y = self.vocab(z)
+        return g[:,:hidden_state.shape[1]],y
+
+class JointMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(JointMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.encoder_mover_2 = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover_2 = nn.Linear(embed_dim,mixture_count,)
+
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.encoder_attention_2 = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention_2 = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        z = torch.zeros_like(x[:,0:1,:])
+        xs = x.shape
+        z0 = torch.zeros([xs[0],1,xs[2]])
+        mover  = self.encoder_mover.weight
+        mover  = (z[:,:1,:]+1)*mover[None,:,:]
+        mover2 = self.encoder_mover_2.weight
+        mover2 = (z[:,:1,:]+1)*mover2[None,:,:]
+        for i in range(x.shape[1]):
+
+            ### dynamics from the state itself
+            g  = torch.cat([ z[:,0:1,:], mover,],dim=1)
+            dg = self.encoder_attention(g[:,0:1],g,g)
+
+            ## dynamics from the presented vector
+            g2  = torch.cat([x[:,i:i+1,:], mover2,],dim=1)
+            dg2 = self.encoder_attention_2(g2[:,0:1],g2,g2)
+
+            z  = z + dg + dg2
+            z  = self.norm1(z)
+        return z
+
+    def forward(self, hidden_state, output_sequence):
+        '''[TBC]change to be like encoder'''
+        x = self.embedding_out(output_sequence).to(self.device)
+        z = hidden_state
         norm = self.norm2
         att = self.decoder_attention
         mover = self.decoder_mover.weight
-        mover = (z+1)*mover[None,:,:]
+        mover = (torch.zeros_like(z)+1)*mover[None,:,:]
 
         for i in range(x.shape[1]):
             z = z + x[:,i:i+1,:]
@@ -364,6 +831,105 @@ class MixtureRNN(nn.Module):
 
         y = self.vocab(z)
         return z,y
+
+
+class SecondOrderMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(SecondOrderMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.encoder_mover_2 = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover_2 = nn.Linear(embed_dim,mixture_count,)
+
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.encoder_attention_2 = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention_2 = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        # z = torch.zeros_like(x[:,0:1,:])
+        xs = x.shape
+        z0 = torch.zeros([xs[0],1,xs[2]])
+        z1 = torch.zeros([xs[0],1,xs[2]])
+
+        norm   = self.norm1
+
+        att   = self.encoder_attention
+        att2  = self.encoder_attention_2
+
+        mover  = self.encoder_mover.weight
+        mover  = (z0[:,:1,:]+1)*mover[None,:,:]
+
+        mover2 = self.encoder_mover_2.weight
+        mover2 = (z0[:,:1,:]+1)*mover2[None,:,:]
+        for i in range(x.shape[1]):
+            z0 = z0 + x[:,i:i+1,:]
+            ### dynamics from the current state itself
+            g   = torch.cat([ z0, mover,],dim=1)
+            dg  = att(g[:,0:1],g,g)
+
+            ## dynamics from the past state vector
+            g2  = torch.cat([ z1, mover2,],dim=1)
+            dg2 = att2(g2[:,0:1],g2,g2)
+
+            z0  = z0 + dg + dg2
+            z0  = norm(z0)
+            z1  = z0
+        return torch.cat((z0,z1),dim=1)
+
+    def forward(self, hidden_state, output_sequence):
+        x = self.embedding_out(output_sequence).to(self.device)
+        xs = x.shape
+        if hidden_state.shape[1]!=2:
+            # hidden_state =
+            hidden_state = torch.cat([hidden_state]*2,dim=1)
+        z0 = hidden_state[:,0:1,:]
+        z1 = hidden_state[:,1:2,:]
+
+
+        norm = self.norm2
+
+        att  = self.decoder_attention
+        att2 = self.decoder_attention_2
+
+        mover = self.decoder_mover.weight
+        mover = (z0[:,:1]*0+1)*mover[None,:,:]
+
+        mover2 = self.decoder_mover_2.weight
+        mover2 = (z0[:,:1]*0+1)*mover2[None,:,:]
+
+
+        for i in range(x.shape[1]):
+            z0  = z0 + x[:,i:i+1,:]
+            ### dynamics from the current state itself
+            g   = torch.cat([ z0, mover,],dim=1)
+            dg  = att(g[:,0:1],g,g)
+
+            ## dynamics from the past state vector
+            g2  = torch.cat([ z1, mover2,],dim=1)
+            dg2 = att2(g2[:,0:1],g2,g2)
+
+            z0  = z0 + dg + dg2
+            z0  = norm(z0)
+            z1  = z0
+        y = self.vocab(z0)
+        return torch.cat((z0,z1),dim=1),y
 
 class ExtendedMixtureRNN(nn.Module):
     def __init__(self, embed_dim, vocab_size,output_vocab_size,max_context_length,CUDA=False):
