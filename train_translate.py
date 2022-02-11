@@ -55,6 +55,7 @@ from Transformer.transfomer import SecondOrderMixtureRNN
 from Transformer.transfomer import AnchorMixtureRNN
 from Transformer.transfomer import BeamAnchorMixtureRNN
 from Transformer.transfomer import AnchorOnlyMixtureRNN
+from Transformer.transfomer import BeamMixtureRNN
 from Transformer.transfomer import decode_with_target
 # model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model =  BasicRNN(embed_dim, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
@@ -64,7 +65,8 @@ from Transformer.transfomer import decode_with_target
 # model = MixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = AnchorOnlyMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
-model = BeamAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = BeamAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+model = BeamMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
@@ -170,23 +172,16 @@ def main():
             ###################
 
 
-
+            item['german'] = item['german'][:,1:]
+            item['logits'] = item['logits'][:,1:]
+            item['logit_mask'] = item['logit_mask'][:,1:]
             all_outs = decode_with_target(model,  hidden, item['german'],IS_GREEDY)
 
 
-            ###################
-            #Mask Out Extra Padded Tokens In The End(Optional)
-            # outputRotation = torch.eye(all_outs.shape[1])
-            # print(outputRotation.shape)
-            # [1])
-            all_outs = all_outs * item["logit_mask"][:,:]
-            # item["logits"] = item["logits"] * item["logit_mask"]
-
-            ###################
 
             ###################
             #BackProp
-            loss = criterion(all_outs,item["logits"][:,:,:])
+            loss = criterion(all_outs, (item["logits"]* item["logit_mask"]))
             loss.backward()
             optimizer.step()
             ###################
@@ -235,7 +230,7 @@ def main():
                             pred_tok = [dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]
                             # print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
                             if isinstance(hidden,tuple):
-                                list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
+                                # list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
                                 # ( z,anchor_value, anchor_att_ret, bpointer,zs )  = hidden
                                 for toki in range(pred_tok.__len__()):
                                     bpointer = (model.pointers//model.mixture_count)[vidx,toki].cpu().detach().numpy()
@@ -246,6 +241,10 @@ def main():
                                 # list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
 
                     for jdx,item in enumerate(dataloader_test):
+                        item['german'] = item['german'][:,1:]
+                        item['logits'] = item['logits'][:,1:]
+                        item['logit_mask'] = item['logit_mask'][:,1:]
+
                         hidden = model.encode(item["english"][:,:])
                         g = item["german"].shape
                         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
@@ -253,7 +252,7 @@ def main():
                         all_outs = decode_with_target(model, hidden, item["german"], IS_GREEDY)
 
                         item["logits"] = item["logits"] * item["logit_mask"]
-                        loss = criterion(all_outs,item["logits"][:,:,:])
+                        loss = criterion(all_outs,item["logits"])
                         running_test_loss.append(loss.item())
                         if(jdx==VALIDATE_AMOUNT):
                             break

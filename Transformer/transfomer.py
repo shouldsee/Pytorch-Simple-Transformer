@@ -19,7 +19,6 @@ def ceil_log2(l):
 def BinaryPositionEncoding(shape,dim):
     l = shape[dim]
     embed = ceil_log2(l)
-    # l = torch
     x = torch.zeros(list(shape)+[embed])
     shape2 = [ int(xx) if ixx==dim else 1  for ixx,xx in enumerate(x.shape)]
     code = torch.range(0,l-1).reshape(shape2)
@@ -340,9 +339,134 @@ class MixtureRNN(nn.Module):
             z = norm(z)
         y = self.vocab(z)
         return z,y
+
     def step(self,hidden_state,x):
         return self.forward(hidden_state,x)
 
+
+class BeamMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(BeamMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+        self.mixture_count = mixture_count
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_mover_disp = nn.Linear(embed_dim,mixture_count,)
+
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.decoder_anchor_attention_log = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=False,mask=False,CUDA=CUDA,
+        return_log=True,
+        )
+        self.decoder_anchor_disp_list = nn.ModuleList( [nn.Linear(embed_dim,embed_dim) for _ in range(self.mixture_count)] )
+        # self.decoder_anchor_lin = nn.Linear(emebd)
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+        self.topk  = 20
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device)
+        xs = x.shape
+        z = torch.zeros_like(x[:,0:1,:])
+        mover = self.encoder_mover.weight
+        mover = (z+1)*mover[None,:,:]
+        for i in range(x.shape[1]):
+            z = z + x[:,i:i+1,:]
+            g  = torch.cat([z, mover,],dim=1)
+            dg =  self.encoder_attention(g,g,g)
+            z = z + dg[:,0:1]
+            z = self.norm1(z)
+
+            # anchor_att_ret_new = self.decoder_anchor_attention_log( mover, z,mover)
+            # znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
+
+
+
+        idxpointer = torch.tensor([],requires_grad=False,dtype=torch.long).to(self.device)
+        znew       = torch.tensor([],requires_grad=True).to(self.device)
+        z          = z  + torch.zeros([xs[0], self.topk, xs[2]])
+        anchor_att_ret = torch.zeros([xs[0],self.topk,1])
+
+        return (z, 0.,anchor_att_ret,idxpointer, z[:,None,:,:])
+        # return z
+
+    def step(self, hidden, x):
+        (z, _, anchor_att_ret, idxpointer, zs ) = hidden
+        x = self.embedding_out(x).to(self.device)
+
+        # z = hidden_state
+        nextk              = self.mixture_count
+        topk  = self.topk
+        norm  = self.norm2
+        xs = z.shape
+        # att   = self.decoder_attention
+        mover = self.decoder_mover.weight[None,:,:]
+        mover = torch.zeros([xs[0],1,1])+mover
+
+        if  min(x.shape)!=0:
+            z = z +0 * x[:,:,:]
+        # g  = torch.cat([z, mover,],dim=1)
+        # dg = att(g,g,g)
+        # z = z + dg[:,0:1]
+        # z = norm(z)
+        y = self.vocab(z)
+
+        anchor_att_ret_new = self.decoder_anchor_attention_log( mover, z,mover)
+        # znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
+        znew = z[:,:,None,:] + self.decoder_mover_disp.weight[None,None,:,:]
+        # znew = znew +
+        ##### Get transfer matrix
+        anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
+        # print(anchor_value_cross[0])
+        #### topk in the transfer matrix
+        val,idx= anchor_value_cross.reshape((xs[0],-1)).topk(topk,dim=1)
+        #### apply actions to states
+        #### take the top k states from transfer matrices
+        znew  = znew.reshape((xs[0],-1, self.embed_dim))
+        znew  = torch.gather(znew, dim=1, index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
+
+        znew  = norm(znew)
+        z     = znew
+        emm   = znew
+
+        anchor_att_ret = val[:,:,None]
+        anchor_att_ret = anchor_att_ret - anchor_att_ret.max(dim=1,keepdims=True)[0]
+        idxpointer     = torch.cat([ idxpointer, idx[:,None,:] ] ,dim=1)
+        zs             = torch.cat([ zs,         emm[:,None,:,:]],dim=1)
+        anchor_value   = None
+        hidden = (z, anchor_value, anchor_att_ret, idxpointer, zs )
+        return hidden, y
+
+    def forward(self, hidden_state, output_sequence):
+        x = self.embedding_out(output_sequence).to(self.device)
+
+        z, anchor_value, anchor_att_ret, bpointer,zs = hidden_state
+
+        y = self.vocab(z)[:,0:1,:]
+        for i in range(x.shape[1]):
+            hidden_state,y = self.step(hidden_state, x[:,i:i+1])
+
+        #### cut the hidden_state z here
+        return ( z, anchor_value, anchor_att_ret, bpointer,zs),y
+
+    # def step(self,hidden_state,x):
+    #     # z, anchor_value,anchor_att_ret,idxpointer,zs = hidden
+    #     return self.forward(hidden_state,x)
+    #
 class AnchorMixtureRNN(nn.Module):
     '''
     Apply an enriched dynamics by splitting the phase space into different regions
@@ -431,22 +555,16 @@ class AnchorMixtureRNN(nn.Module):
 
         # y = self.decoder_anchor_key(z)
         # zoff = self.encoder_anchor_key.weight[None,0:1,:]
-
         # y = torch.matmul( z,self.embedding_out.lut.weight.T)
-        # y =
         # y = F.log_softmax(y,dim=2)
         y = self.vocab(z)
 
         #### cut the hidden_state z here
         return (  z,anchor_value),y
+
     def step(self,hidden_state,x):
         return self.forward(hidden_state,x)
 
-
-# class RecurrentModel(nn.Module):
-#     def step(self):
-#         pass
-#
 
 class BeamAnchorMixtureRNN(nn.Module):
     '''
@@ -481,6 +599,7 @@ class BeamAnchorMixtureRNN(nn.Module):
         return_log=True,
         )
         self.decoder_anchor_disp = nn.Linear(embed_dim,embed_dim)
+        self.decoder_anchor_disp_list = nn.ModuleList( [nn.Linear(embed_dim,embed_dim) for _ in range(self.mixture_count)] )
 
         self.norm1 = LayerNorm(embed_dim)
         self.norm2 = LayerNorm(embed_dim)
@@ -523,7 +642,7 @@ class BeamAnchorMixtureRNN(nn.Module):
         anchor_att_ret = torch.zeros([xs[0],self.topk,1])
 
         # assert 0.
-        return ( z , anchor_value, anchor_att_ret, idxpointer, 0*z[:,None,:,:])
+        return (  z , anchor_value, anchor_att_ret, idxpointer, 0*z[:,None,:,:])
 
     def step(self, hidden,x):
         x = self.embedding_out(x).to(self.device)
@@ -543,79 +662,59 @@ class BeamAnchorMixtureRNN(nn.Module):
         # z = z + torch.zeros([xs[0], topk, xs[2]])
         nextk = self.mixture_count
 
-        print = lambda *x:None
+        _print = lambda *x:None
 
         z = z + torch.zeros([xs[0],topk,xs[2]])
 
         # achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
         # anchor_value)
 
-
-
-
-        # anchor_att_ret_new = anchor_att_log(mover,z,mover)
-        # anchor_value_disp = self.decoder_anchor_disp(z)
-
-
-        # achs = anchor_value
-        achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
-        dg2 = anchor_reader(z, achs, achs)
-        # anchor_value)
-
+        #### get probability of actions
+        # achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
+        achs = mover[:,:nextk,:]
         anchor_att_ret_new = anchor_att_log(achs,z,achs)
-        anchor_value_disp = self.decoder_anchor_disp(achs)
-        # anchor_value_disp = att(z,achs,achs)
 
-        if 0:
-            dg2 = anchor_reader(z, anchor_value, anchor_value)
-            anchor_att_ret_new = anchor_att_log(anchor_value,z,anchor_value)
-            anchor_value_disp = self.decoder_anchor_disp(anchor_value)
-        # anchor_value_disp = self.decoder_anchor_disp.weight[None,:,:]
-        # achs)
-        # anchor_value_disp = att(mover,z,z)
-        # achs)
 
-        # print(anchor_att_ret_new.exp().sum(dim=2))
-        # print(anchor_att_ret_new.T.shape)
-        # print(anchor_value_disp.shape)
-        # print(anchor_att_ret.shape)
-        # print(anchor_att_ret_new.shape)
-        print('[z]',z.shape)
-        # print(dg2.shape)
+        #### Get actions
+        # anchor_value_disp = self.decoder_anchor_disp(achs)
+        # anchor_value_disp = self.decoder_anchor_disp(achs)
+        # znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
+
+        # znew = self.decoder_anchor_disp_list[0](z)
+        znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
+        # print(znew.shape)
+        # assert 0
+
+        ##### Get transfer matrix
         anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
-        # print(anchor_value_cross.shape)
-        print(anchor_att_ret[0])
-        print(anchor_att_ret_new[0])
 
+        #### topk in the transfer matrix
         val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
 
-        znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
+        #### apply actions to states
+        #### take the top k states from transfer matrices
         znew  = znew.reshape((x.size(0),-1, self.embed_dim))
+        znew = torch.gather(znew,dim=1,index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
 
-        znew = znew[torch.arange(z.size(0))[:,None]+torch.zeros_like(idx), idx,:]
         anchor_att_ret =  val[:,:,None]
         anchor_att_ret = anchor_att_ret - anchor_att_ret.max(dim=1,keepdims=True)[0]
-        anchor_att_ret = anchor_att_ret
 
         z = znew
         idxpointer = torch.cat([ idxpointer, idx[:,None,:] ],dim=1)
-        # fpointer =
-        # print('[MAX]',bpointer[0].max())
-        # print('[MAX]',idx[0].max())
-        # print(anchor_value_cross[0])
-        # zs = torch.cat([zs,z[:,None,:,:]],dim=1)
-        zs = torch.cat([zs,z[:,None,:,:]],dim=1)
 
-        # print(anchor_att_ret_new[0][:5,:5])
-        # print(bpointer.max())
-        print(idxpointer.shape)
-        print(zs.shape)
-        print()
-        # print(anchor_att_ret[0])
-        # print(z[0,:,0])
-
-        z = z + 0*dg2
+        #### Save state for later emssion
+        z = z
         z = norm(z)
+        emm = anchor_reader(z, anchor_value, anchor_value)
+
+        # emm = anchor_reader(z, anchor_value, anchor_value)
+
+        zs = torch.cat([zs,emm[:,None,:,:]],dim=1)
+
+        # print(idxpointer.shape)
+        # print(zs.shape)
+        # print()
+
         y_right = self.vocab(z[:,0:1,:])
         return (z, anchor_value,anchor_att_ret,idxpointer,zs),y_right
 
@@ -636,7 +735,8 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
     g = batch_target.shape
     self = model
     if isinstance(model,BeamAnchorMixtureRNN):
-        '''Sample the top-k most likely chains using
+        '''
+        Sample the top-k most likely chains using
         a beam search heuristic
         '''
         logps = torch.tensor([],requires_grad=True).to(self.device)
@@ -651,21 +751,19 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         nextk = self.mixture_count
         bpointer = idxpointer//nextk
         fpointer = idxpointer%nextk
-        # print(bpointer.shape,zs.shape,batch_target.shape)
-        topk = 20
+
+        ####
+        topk = 10
         bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
         pointers = bp * nextk
-        for i in range(g[1]-1 -1,0 -1,-1):
+        its = list(range(g[1]-1 -1, 0 -1,-1))
+        for i in its:
             # print(i,g[1],bpointer.size(1))
-            bpnew = torch.gather(idxpointer[:,i:i+1,:],dim=2,index=bp)
-            # bpnew = bpnew // nextk
+            bpnew      = torch.gather(idxpointer[:,i:i+1,:],dim=2,index=bp)
             pointers   = torch.cat([bpnew,pointers],dim=1)
-            bp    = bpnew // nextk
-        # print(pointers[0])
-
+            bp         = bpnew // nextk
 
         pointers_back = pointers//nextk
-        # print(pointers_back[0,-1])
         zsel     = torch.cat([torch.gather(zs[:,:,:,i:i+1],dim=2,index=pointers_back[:,:,:,None]) for i in range(zs.size(3))], dim=3)
         logpsel  = torch.gather(logps, 2, pointers_back)
         logpsel  = logpsel.sum(dim=1,keepdims=True)
@@ -673,28 +771,73 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         psel     = F.log_softmax(logpsel,dim=2)
         # - math.log(psel.size(2))
         out_prob_bychain = self.vocab(zsel)
-        # psel  = logpsel - math.log(out_prob_bychain.size(3))
-        # psel  = logpsel / (out_prob_bychain.size(3)) /
-        # print(psel.shape,out_prob_bychain.shape)
         out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
         # out_prob = torch.sum(torch.exp(out_prob_bychain),dim=2)
         if print_debug:
-
             print(psel.shape,out_prob_bychain.shape)
             print(out_prob[0][5].sum(-1))
             print(pointers_back[0,-31:,:])
             print(torch.exp(psel[:,:,:,None]+out_prob_bychain)[0,1].sum(-1))
         # out_prob = torch.sum(torch.exp( out_prob_bychain),dim=2)
-        # out_prob = torch
         eps=  1E-6
         # out_prob = F.softmax(psel[:,:,:,None]+ out_prob_bychain,dim=2)
-        out_prob = torch.log(eps+ out_prob)
-        # out_prob = torch.log_softmax(out_prob,dim=-1)
+        out_prob = torch.log(eps + out_prob)
         out_prob = out_prob[:,:]
-        # print(out_prob[0,0].sum(-1))
         model.pointers = pointers
         return out_prob
 
+    elif isinstance(model,BeamMixtureRNN):
+    # elif 0:
+        '''
+        Sample the top-k most likely chains using
+        a beam search heuristic
+        '''
+        logps = torch.tensor([],requires_grad=True).to(self.device)
+        for i in range(g[1]-1):
+            ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
+            logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
+            hidden, yf = self.step(hidden, batch_target[:,i-1:i])
+
+        ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
+        logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
+
+        nextk = self.mixture_count
+        bpointer = idxpointer//nextk
+        fpointer = idxpointer%nextk
+
+        ####
+        topk = 10
+        bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
+        pointers = bp * nextk
+        its = list(range(g[1]-1 -1, 0 -1,-1))
+        for i in its:
+            # print(i,g[1],bpointer.size(1))
+            bpnew      = torch.gather(idxpointer[:,i:i+1,:],dim=2,index=bp)
+            pointers   = torch.cat([bpnew,pointers],dim=1)
+            bp         = bpnew // nextk
+
+        pointers_back = pointers//nextk
+        zsel     = torch.cat([torch.gather(zs[:,:,:,i:i+1],dim=2,index=pointers_back[:,:,:,None]) for i in range(zs.size(3))], dim=3)
+        logpsel  = torch.gather(logps, 2, pointers_back)
+        logpsel  = logpsel.sum(dim=1,keepdims=True)
+        psel     = logpsel
+        psel     = F.log_softmax(logpsel,dim=2)
+        # - math.log(psel.size(2))
+        out_prob_bychain = self.vocab(zsel)
+        out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
+        # out_prob = torch.sum(torch.exp(out_prob_bychain),dim=2)
+        if print_debug:
+            print(psel.shape,out_prob_bychain.shape)
+            print(out_prob[0][5].sum(-1))
+            print(pointers_back[0,-31:,:])
+            print(torch.exp(psel[:,:,:,None]+out_prob_bychain)[0,1].sum(-1))
+        # out_prob = torch.sum(torch.exp( out_prob_bychain),dim=2)
+        eps=  1E-6
+        # out_prob = F.softmax(psel[:,:,:,None]+ out_prob_bychain,dim=2)
+        out_prob = torch.log(eps + out_prob)
+        out_prob = out_prob[:,:]
+        model.pointers = pointers
+        return out_prob
 
     else:
         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(model.device)
