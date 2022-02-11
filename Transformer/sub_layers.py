@@ -8,45 +8,6 @@ import math
 Transformer Implementation By Chenrong Lu 2021
 Some Layers Refer to The Annotated Transformer (Harvard NLP)
 """
-# class SelfAttentionOld(nn.Module):
-#     def __init__(self,embed_dim,d_k,d_v,mask=False):
-#         super(SelfAttentionOld,self).__init__()
-#         self.query_embed = nn.Linear(embed_dim,d_k)
-#         self.key_embed = nn.Linear(embed_dim,d_k)
-#         self.value_embed = nn.Linear(embed_dim,d_v)
-#         self.d_k = d_k
-#         self.mask = mask
-#         self.dropout = nn.Dropout(0.1)
-#
-#     def forward(self,query_in,key_in,value_in):
-#         query = self.query_embed (query_in)
-#         key   = self.key_embed   (key_in)
-#         value = self.value_embed (value_in)
-#         # value = value_in
-#
-#         # value = value_in
-#         # value = value_in
-#         key_transposed = torch.transpose(key,1,2)
-#         #Get attention weights
-#         attention_weights = torch.matmul(query,key_transposed)  #(n_query,n_key)
-#         attention_weights = attention_weights - 0.5 * torch.sum(torch.square(query),dim=2,keepdim=True)
-#         attention_weights = attention_weights - 0.5 * torch.transpose(torch.sum(torch.square(key),dim=2,keepdim=True),1,2)
-#         attention_weights = attention_weights/math.sqrt(self.d_k)
-#         if(self.mask==True):
-#             #REF : http://peterbloem.nl/blog/transformers
-#             indices = torch.triu_indices(attention_weights.shape[1],attention_weights.shape[2], offset=1)
-#             attention_weights[:, indices[0], indices[1]] = float('-inf')
-#         # attention_weights = torch.abs(attention_weights)
-#         attention_weights = F.softmax(attention_weights, dim=2)
-#         # attention_weights = attention_weights - torch.transpose(attention_weights,1,2)
-#         attention_weights = attention_weights - torch.mean(attention_weights,dim=2,keepdim=True)
-#
-#         # attention_weights
-#         #Apply attention weights to value
-#         attention_weighted_value = torch.matmul(attention_weights,value) #(n_query,n_key) matmul (n_key || n_query , d_v)
-#         # attention_weighted_value = self.value_embed(attention_weighted_value)
-#         attention_weighted_value = self.dropout(attention_weighted_value)
-#         return attention_weighted_value
 
 
 
@@ -76,7 +37,8 @@ class StateTransfer(nn.Module):
         return self.attention(q,k,v)
 
 class SelfAttention(nn.Module):
-    def __init__(self,embed_dim,d_ker,d_v,mask=False,CUDA=False,is_value_embed = True, ):
+    def __init__(self,embed_dim,d_ker,d_v,mask=False,CUDA=False,is_value_embed = True, return_attention=False,is_state_transfer=False,
+    return_log = False,):
         super(SelfAttention,self).__init__()
         self.attention = GenericAttention(
             d_q = embed_dim,
@@ -84,13 +46,21 @@ class SelfAttention(nn.Module):
             d_v = embed_dim,
             d_ker = d_ker,
             d_o = d_v,
-            is_value_embed = is_value_embed)
+            is_value_embed = is_value_embed,
+            is_state_transfer=is_state_transfer,
+            return_attention = return_attention,
+            return_log = return_log,)
     def forward(self, q,k,v):
         return self.attention(q,k,v)
 
 class GenericAttention(nn.Module):
-    def __init__(self, d_q, d_k, d_ker, d_v, d_o , is_value_embed, is_state_transfer = False, return_attention = False,mask=False,CUDA=False):
-
+    def __init__(self, d_q, d_k, d_ker, d_v, d_o , is_value_embed, is_state_transfer = False, return_attention = False,mask=False,CUDA=False,
+    return_log = False,
+    ):
+        if return_log:
+            self._softmax = F.log_softmax
+        else:
+            self._softmax = F.softmax
     # def __init__(self,embed_dim,d_k,d_v,mask=False,CUDA=False):
         super(GenericAttention,self).__init__()
         # self.embed_value = embed_value
@@ -105,7 +75,7 @@ class GenericAttention(nn.Module):
         self.value_embed = nn.Linear(d_v, d_o)
         self.d_k  = d_k
         self.mask = mask
-        self.dropout = nn.Dropout(0.1)
+        # self.dropout = nn.Dropout(0.1)
 
     def forward(self,query_in,key_in,value_in):
 
@@ -141,9 +111,9 @@ class GenericAttention(nn.Module):
             # attention_weights[:, indices[0], indices[1]] = float('-inf')
         shape0 = attention_weights.shape
         if self.is_state_transfer:
-            attention_weights = F.softmax(attention_weights,dim=1)
+            attention_weights = self._softmax(attention_weights,dim=1)
         else:
-            attention_weights = F.softmax(attention_weights,dim=2)
+            attention_weights = self._softmax(attention_weights,dim=2)
         if self.return_attention:
             return attention_weights
         # attention_weights = attention_weights *0.
@@ -188,9 +158,11 @@ class LayerNorm(nn.Module):
     def forward(self, x):
         mean = x.mean(-1, keepdim=True)
         std = x.std(-1, keepdim=True)
-        div =  (std + self.eps) + self.shift
-
-        return self.scale * (x - mean) / div
+        div =  (std + self.eps) + torch.abs(self.shift)
+        ret = self.scale * (x - mean) / div
+        # assert not torch.isinf(ret).any(),'Detected inf'
+        # assert not torch.isnan(ret).any(),'Detected na'
+        return ret
         #/(div)
 class PositionWiseFeedForward(nn.Module):
     def __init__(self,embed_dim,output_dim):

@@ -54,8 +54,8 @@ from Transformer.transfomer import JointMixtureRNN
 from Transformer.transfomer import SecondOrderMixtureRNN
 from Transformer.transfomer import AnchorMixtureRNN
 from Transformer.transfomer import BeamAnchorMixtureRNN
-
 from Transformer.transfomer import AnchorOnlyMixtureRNN
+from Transformer.transfomer import decode_with_target
 # model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model =  BasicRNN(embed_dim, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
@@ -108,6 +108,9 @@ else:
     LOAD = -1
 
 
+
+
+IS_GREEDY = '--greedy' in sys.argv
 STRICT_LOAD = '--nostrict' not in sys.argv
 def main():
     if(LOAD!=-1):
@@ -152,7 +155,6 @@ def main():
             """
             model.train()
             # print(model.encoder_mover.weight.T[:,:5])
-            # print(model.encoder_mover.weight.T[:,:5])
             # .shape)
             ###################
             #Zero Gradients
@@ -168,26 +170,8 @@ def main():
             ###################
 
 
-            g = item['german'].shape
-            x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
-            all_outs = torch.tensor([],requires_grad=True).to(device)
-            for i in range(item["german"].shape[1]-1):
-                xx = torch.zeros( [g[0],g[1], ],dtype=torch.long ).to(device)
 
-                if '--greedy' in sys.argv:
-                    hidden,out = model(hidden,  x[:,i-1:i])
-                    y = out.argmax(axis=-1)
-                    xx[:,i:i+1] = y
-                    x = x+xx
-                else:
-                    hidden,out = model(hidden,  item["german"][:,i-1:i])
-
-                # hidden,out = model(hidden,  item["german"][:,i-1:i])
-                # xx[:,i:i+1] = item["german"][:,i:i+1]
-                # xx[:,i:i+1] = out.argmax(axis=-1)
-                # x = x+xx
-                # x[:,i:i+1] = x[:,i:i+1] + out.argmax(axis=-1)
-                all_outs = torch.cat((all_outs,out),dim=1)
+            all_outs = decode_with_target(model,  hidden, item['german'],IS_GREEDY)
 
 
             ###################
@@ -195,14 +179,14 @@ def main():
             # outputRotation = torch.eye(all_outs.shape[1])
             # print(outputRotation.shape)
             # [1])
-            all_outs = all_outs * item["logit_mask"][:,:-1]
+            all_outs = all_outs * item["logit_mask"][:,:]
             # item["logits"] = item["logits"] * item["logit_mask"]
 
             ###################
 
             ###################
             #BackProp
-            loss = criterion(all_outs,item["logits"][:,:-1,:])
+            loss = criterion(all_outs,item["logits"][:,:,:])
             loss.backward()
             optimizer.step()
             ###################
@@ -241,62 +225,35 @@ def main():
                         print([dataset.english_vocab_reversed[xx] for xx in x.cpu().detach().numpy().ravel()])
 
 
-                        # pirnt(x.shape)
-                        x0 = x
-                        hidden = model.encode(x)
-                        g = x.shape
-                        # print((hidden[1][:,:,:3].T.cpu().numpy()*10).astype(int))
-                        x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
-                        all_outs = torch.tensor([],requires_grad=True).to(device)
 
-                        # last = x[:,0:1,:]
-                        # last = torch.zeros_like(hidden_dim,)
-                        MAXVAL = 0
-                        xx = torch.zeros( [ g[0],g[1], ],dtype=torch.long ).to(device)
-                        for i in range(20):
-                            xx = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
-                            hidden,out = model(hidden,  x[:,i-1:i])
-                            y = out.argmax(axis=-1)
-                            xx[:,i:i+1] = y
-                            x = x+xx
-                            all_outs = torch.cat((all_outs,out),dim=1)
-                        # from pprint import pprint
-                        for vidx in range(len(x0)):
+                        hidden = model.encode(x)
+                        all_outs = decode_with_target(model, hidden, x, is_greedy=1)
+                        for vidx in range(len(x)):
                             print('==============')
-                            print('INPUT:'+ ','.join([dataset.english_vocab_reversed[xx].__repr__() for xx in x0[vidx].cpu().detach().numpy().ravel()]))
-                            print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
-                            list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
+                            print('INPUT:'+ ','.join([dataset.english_vocab_reversed[xx].__repr__() for xx in x[vidx].cpu().detach().numpy().ravel()]))
+                            print('PRED:'+ ','.join([dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]))
+                            pred_tok = [dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]
+                            # print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
+                            if isinstance(hidden,tuple):
+                                list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
+                                # ( z,anchor_value, anchor_att_ret, bpointer,zs )  = hidden
+                                for toki in range(pred_tok.__len__()):
+                                    bpointer = (model.pointers//model.mixture_count)[vidx,toki].cpu().detach().numpy()
+                                    fpointer = (model.pointers%model.mixture_count)[vidx,toki].cpu().detach().numpy()
+                                    print(fpointer,pred_tok[toki],bpointer)
+                                    # print((,pred_tok[toki])
+                                    # print(model.pointers.shape,toki,all_outs.shape,)
+                                # list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
 
                     for jdx,item in enumerate(dataloader_test):
                         hidden = model.encode(item["english"][:,:])
                         g = item["german"].shape
                         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
-                        all_outs = torch.tensor([],requires_grad=True).to(device)
 
-                        # last = x[:,0:1,:]
-                        # last = torch.zeros_like(hidden_dim,)
-                        MAXVAL = 0
-                        xx = torch.zeros( [ g[0],g[1], ],dtype=torch.long ).to(device)
-                        for i in range(item["german"].shape[1]-1):
-                            xx = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
-
-                            if '--greedy' in sys.argv:
-                                hidden,out = model(hidden,  x[:,i-1:i])
-                                y = out.argmax(axis=-1)
-                                xx[:,i:i+1] = y
-                                x = x+xx
-                            else:
-                                hidden,out = model(hidden,  item["german"][:,i-1:i])
-                            # item["german"][:,i-1:i])
-                                            # hidden,out = model(hidden, x)
-                            # MAXVAL = max(MAXVAL,int(y.max()))
-                            all_outs = torch.cat((all_outs,out),dim=1)
-                        # print(MAXVAL,dataset.german_vocab_len)
-                        # all_outs = model(model.encode_out)[:,:]
-                        # all_outs = all_outs * item["logit_mask"][:,1:-2,:]
+                        all_outs = decode_with_target(model, hidden, item["german"], IS_GREEDY)
 
                         item["logits"] = item["logits"] * item["logit_mask"]
-                        loss = criterion(all_outs,item["logits"][:,:-1,:])
+                        loss = criterion(all_outs,item["logits"][:,:,:])
                         running_test_loss.append(loss.item())
                         if(jdx==VALIDATE_AMOUNT):
                             break

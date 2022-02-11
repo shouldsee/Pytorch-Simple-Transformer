@@ -284,6 +284,9 @@ class BasicRNN(nn.Module):
         y = self.vocab(z)
         return z,y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
+
 class MixtureRNN(nn.Module):
     '''
     Apply an enriched dynamics by splitting the phase space into different regions
@@ -337,6 +340,8 @@ class MixtureRNN(nn.Module):
             z = norm(z)
         y = self.vocab(z)
         return z,y
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
 
 class AnchorMixtureRNN(nn.Module):
     '''
@@ -434,8 +439,14 @@ class AnchorMixtureRNN(nn.Module):
 
         #### cut the hidden_state z here
         return (  z,anchor_value),y
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
 
 
+# class RecurrentModel(nn.Module):
+#     def step(self):
+#         pass
+#
 
 class BeamAnchorMixtureRNN(nn.Module):
     '''
@@ -473,7 +484,7 @@ class BeamAnchorMixtureRNN(nn.Module):
 
         self.norm1 = LayerNorm(embed_dim)
         self.norm2 = LayerNorm(embed_dim)
-
+        self.topk = 20
         # self.norm3 = LayerNorm(embed_dim)
 
     def encode(self,input_sequence):
@@ -506,72 +517,200 @@ class BeamAnchorMixtureRNN(nn.Module):
             anchor_value  = anchor_norm(anchor_value)
             # , anchor_att_ret.sum(axis=1)[0])
 
-        return ( 0*z , anchor_value, 0.)
+        idxpointer = torch.tensor([],requires_grad=False,dtype=torch.long).to(self.device)
+        znew    = torch.tensor([],requires_grad=True).to(self.device)
+        z = z  + torch.zeros([xs[0], self.topk, xs[2]])
+        anchor_att_ret = torch.zeros([xs[0],self.topk,1])
 
-    def forward(self, hidden_state, output_sequence):
-        topk = 20
+        # assert 0.
+        return ( z , anchor_value, anchor_att_ret, idxpointer, 0*z[:,None,:,:])
 
-        x = self.embedding_out(output_sequence).to(self.device)
-        xs = x.shape
+    def step(self, hidden,x):
+        x = self.embedding_out(x).to(self.device)
+        z, anchor_value,anchor_att_ret,idxpointer,zs = hidden
 
-        z, anchor_value,anchor_att_ret = hidden_state
-        norm = self.norm2
-        att  = self.decoder_attention
+        xs    = x.shape
+        topk  = self.topk
+        norm  = self.norm2
+        att   = self.decoder_attention
         mover = self.decoder_mover.weight
         mover = torch.zeros([xs[0], 1, xs[2]])+mover[None,:,:]
 
         anchor_att_log   = self.decoder_anchor_attention_log
-        anchor_reader = self.decoder_anchor_reader
+        anchor_reader    = self.decoder_anchor_reader
 
         anchor_att_ret = torch.zeros([xs[0],topk,1]) + anchor_att_ret
-        z = torch.zeros([xs[0], topk, xs[2]]) + z
-
+        # z = z + torch.zeros([xs[0], topk, xs[2]])
         nextk = self.mixture_count
 
         print = lambda *x:None
-        for i in range(x.shape[1]):
-            z  = z*1 + 1*x[:,i:i+1,:]
-            # torch.cat([z,anchor_value])
 
+        z = z + torch.zeros([xs[0],topk,xs[2]])
+
+        # achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
+        # anchor_value)
+
+
+
+
+        # anchor_att_ret_new = anchor_att_log(mover,z,mover)
+        # anchor_value_disp = self.decoder_anchor_disp(z)
+
+
+        # achs = anchor_value
+        achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
+        dg2 = anchor_reader(z, achs, achs)
+        # anchor_value)
+
+        anchor_att_ret_new = anchor_att_log(achs,z,achs)
+        anchor_value_disp = self.decoder_anchor_disp(achs)
+        # anchor_value_disp = att(z,achs,achs)
+
+        if 0:
             dg2 = anchor_reader(z, anchor_value, anchor_value)
-
-
             anchor_att_ret_new = anchor_att_log(anchor_value,z,anchor_value)
             anchor_value_disp = self.decoder_anchor_disp(anchor_value)
+        # anchor_value_disp = self.decoder_anchor_disp.weight[None,:,:]
+        # achs)
+        # anchor_value_disp = att(mover,z,z)
+        # achs)
 
-            print(anchor_att_ret_new.exp().sum(dim=2))
-            # print(anchor_att_ret_new.T.shape)
-            print(anchor_value_disp.shape)
-            print(anchor_att_ret.shape)
-            print(anchor_att_ret_new.shape)
-            print('[z]',z.shape)
-            # print(dg2.shape)
-            anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
-            print(anchor_value_cross.shape)
+        # print(anchor_att_ret_new.exp().sum(dim=2))
+        # print(anchor_att_ret_new.T.shape)
+        # print(anchor_value_disp.shape)
+        # print(anchor_att_ret.shape)
+        # print(anchor_att_ret_new.shape)
+        print('[z]',z.shape)
+        # print(dg2.shape)
+        anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
+        # print(anchor_value_cross.shape)
+        print(anchor_att_ret[0])
+        print(anchor_att_ret_new[0])
 
-            val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
-            znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
-            znew  = znew.reshape((x.size(0),-1, self.embed_dim))
+        val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
 
-            znew = znew[torch.arange(z.size(0))[:,None]+torch.zeros_like(idx), idx,:]
-            anchor_att_ret =  val[:,:,None]
+        znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
+        znew  = znew.reshape((x.size(0),-1, self.embed_dim))
 
-            z = znew
-            print(znew.shape)
-            print(idx.shape,val.shape)
-            print(idx[0],val[0])
-            print(idx.shape)
-            print(znew.shape)
-            # torch.topk(anchor_value_cross)
-            # print(z[0,:,0])
+        znew = znew[torch.arange(z.size(0))[:,None]+torch.zeros_like(idx), idx,:]
+        anchor_att_ret =  val[:,:,None]
+        anchor_att_ret = anchor_att_ret - anchor_att_ret.max(dim=1,keepdims=True)[0]
+        anchor_att_ret = anchor_att_ret
 
-            z = z + 0*dg2
-            z = norm(z)
+        z = znew
+        idxpointer = torch.cat([ idxpointer, idx[:,None,:] ],dim=1)
+        # fpointer =
+        # print('[MAX]',bpointer[0].max())
+        # print('[MAX]',idx[0].max())
+        # print(anchor_value_cross[0])
+        # zs = torch.cat([zs,z[:,None,:,:]],dim=1)
+        zs = torch.cat([zs,z[:,None,:,:]],dim=1)
 
+        # print(anchor_att_ret_new[0][:5,:5])
+        # print(bpointer.max())
+        print(idxpointer.shape)
+        print(zs.shape)
+        print()
+        # print(anchor_att_ret[0])
+        # print(z[0,:,0])
+
+        z = z + 0*dg2
+        z = norm(z)
+        y_right = self.vocab(z[:,0:1,:])
+        return (z, anchor_value,anchor_att_ret,idxpointer,zs),y_right
+
+    def forward(self, hidden_state, output_sequence):
+        z, anchor_value, anchor_att_ret, bpointer,zs = hidden_state
 
         y = self.vocab(z)[:,0:1,:]
+        for i in range(x.shape[1]):
+            hidden_state,y = self.step(hidden_state, x[:,i:i+1])
+
         #### cut the hidden_state z here
-        return (  z,anchor_value, anchor_att_ret),y
+        return ( z,anchor_value, anchor_att_ret, bpointer,zs),y
+
+import math
+
+
+def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
+    g = batch_target.shape
+    self = model
+    if isinstance(model,BeamAnchorMixtureRNN):
+        '''Sample the top-k most likely chains using
+        a beam search heuristic
+        '''
+        logps = torch.tensor([],requires_grad=True).to(self.device)
+        for i in range(g[1]-1):
+            ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
+            logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
+            hidden, yf = self.step(hidden, batch_target[:,i-1:i])
+
+        ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
+        logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
+
+        nextk = self.mixture_count
+        bpointer = idxpointer//nextk
+        fpointer = idxpointer%nextk
+        # print(bpointer.shape,zs.shape,batch_target.shape)
+        topk = 20
+        bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
+        pointers = bp * nextk
+        for i in range(g[1]-1 -1,0 -1,-1):
+            # print(i,g[1],bpointer.size(1))
+            bpnew = torch.gather(idxpointer[:,i:i+1,:],dim=2,index=bp)
+            # bpnew = bpnew // nextk
+            pointers   = torch.cat([bpnew,pointers],dim=1)
+            bp    = bpnew // nextk
+        # print(pointers[0])
+
+
+        pointers_back = pointers//nextk
+        # print(pointers_back[0,-1])
+        zsel     = torch.cat([torch.gather(zs[:,:,:,i:i+1],dim=2,index=pointers_back[:,:,:,None]) for i in range(zs.size(3))], dim=3)
+        logpsel  = torch.gather(logps, 2, pointers_back)
+        logpsel  = logpsel.sum(dim=1,keepdims=True)
+        psel     = logpsel
+        psel     = F.log_softmax(logpsel,dim=2)
+        # - math.log(psel.size(2))
+        out_prob_bychain = self.vocab(zsel)
+        # psel  = logpsel - math.log(out_prob_bychain.size(3))
+        # psel  = logpsel / (out_prob_bychain.size(3)) /
+        # print(psel.shape,out_prob_bychain.shape)
+        out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
+        # out_prob = torch.sum(torch.exp(out_prob_bychain),dim=2)
+        if print_debug:
+
+            print(psel.shape,out_prob_bychain.shape)
+            print(out_prob[0][5].sum(-1))
+            print(pointers_back[0,-31:,:])
+            print(torch.exp(psel[:,:,:,None]+out_prob_bychain)[0,1].sum(-1))
+        # out_prob = torch.sum(torch.exp( out_prob_bychain),dim=2)
+        # out_prob = torch
+        eps=  1E-6
+        # out_prob = F.softmax(psel[:,:,:,None]+ out_prob_bychain,dim=2)
+        out_prob = torch.log(eps+ out_prob)
+        # out_prob = torch.log_softmax(out_prob,dim=-1)
+        out_prob = out_prob[:,:]
+        # print(out_prob[0,0].sum(-1))
+        model.pointers = pointers
+        return out_prob
+
+
+    else:
+        x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(model.device)
+        all_outs = torch.tensor([],requires_grad=True).to(model.device)
+        for i in range(batch_target.shape[1]):
+            xx = torch.zeros( [g[0],g[1], ],dtype=torch.long ).to(model.device)
+
+            if is_greedy:
+                hidden,out = model.step(hidden,  x[:,i-1:i])
+                y = out.argmax(axis=-1)
+                xx[:,i:i+1] = y
+                x = x+xx
+            else:
+                hidden,out = model.step(hidden, batch_target[:,i-1:i])
+            all_outs = torch.cat((all_outs,out),dim=1)
+        return all_outs
 
 class AnchorOnlyMixtureRNN(nn.Module):
     '''
@@ -673,7 +812,7 @@ class AnchorOnlyMixtureRNN(nn.Module):
 
             ximg = anchor_reader(z, anchor_key_ximg, anchor_value_ximg)
 
-            anchor_att_ret = anchor_att(anchor_key_ximg,z,z)
+            anchor_att_ret     = anchor_att(anchor_key_ximg,z,z)
             anchor_value_ximg  = (1-anchor_att_ret) * anchor_value_ximg + anchor_att_ret *z
             anchor_value_ximg  = anchor_norm(anchor_value_ximg)
 
@@ -687,6 +826,8 @@ class AnchorOnlyMixtureRNN(nn.Module):
         y = self.vocab(z)
         return (z,anchor_value,anchor_value_ximg),y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
 
 
 class DynamicMixtureRNN(nn.Module):
@@ -762,6 +903,9 @@ class DynamicMixtureRNN(nn.Module):
         y = self.vocab(z)
         return g[:,:hidden_state.shape[1]],y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
+
 class JointMixtureRNN(nn.Module):
     '''
     Apply an enriched dynamics by splitting the phase space into different regions
@@ -832,6 +976,8 @@ class JointMixtureRNN(nn.Module):
         y = self.vocab(z)
         return z,y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
 
 class SecondOrderMixtureRNN(nn.Module):
     '''
@@ -931,6 +1077,10 @@ class SecondOrderMixtureRNN(nn.Module):
         y = self.vocab(z0)
         return torch.cat((z0,z1),dim=1),y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
+
+
 class ExtendedMixtureRNN(nn.Module):
     def __init__(self, embed_dim, vocab_size,output_vocab_size,max_context_length,CUDA=False):
         super(ExtendedMixtureRNN, self).__init__()
@@ -984,6 +1134,10 @@ class ExtendedMixtureRNN(nn.Module):
         y = self.vocab(z)
         return z,y
 
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
+
+
 class TransformerTranslatorFeng(nn.Module):
     def __init__(self,embed_dim,num_blocks,num_heads,vocab_size,
     output_vocab_size,max_context_length,CUDA=False):
@@ -1029,3 +1183,5 @@ class TransformerTranslatorFeng(nn.Module):
 
             # embedding = self.embedding2(output_sequence)
             # return self.decoder(self.encode_out,embedding)
+    def step(self,hidden_state,x):
+        return self.forward(hidden_state,x)
