@@ -378,7 +378,7 @@ class BeamMixtureRNN(nn.Module):
 
         self.norm1 = LayerNorm(embed_dim)
         self.norm2 = LayerNorm(embed_dim)
-        self.topk  = 20
+        self.topk  = 6
 
     def encode(self,input_sequence):
         x = self.embedding(input_sequence).to(self.device)
@@ -408,10 +408,10 @@ class BeamMixtureRNN(nn.Module):
 
     def step(self, hidden, x):
         (z, _, anchor_att_ret, idxpointer, zs ) = hidden
-        x = self.embedding_out(x).to(self.device)
-        x = 0*x #[DBG CONTROL]
+        # x = self.embedding_out(x).to(self.device)
+        # x = 0*x #[DBG CONTROL]
         # z = hidden_state
-        nextk              = self.mixture_count
+        nextk  = self.mixture_count
         topk  = self.topk
         norm  = self.norm2
         xs = z.shape
@@ -419,26 +419,50 @@ class BeamMixtureRNN(nn.Module):
         mover = self.decoder_mover.weight[None,:,:]
         mover = torch.zeros([xs[0],1,1])+mover
 
-        if  min(x.shape)!=0:
-            z = z + x[:,:,:]
-        # g  = torch.cat([z, mover,],dim=1)
-        # dg = att(g,g,g)
-        # z = z + dg[:,0:1]
-        # z = norm(z)
-        y = self.vocab(z)
-
         anchor_att_ret_new = self.decoder_anchor_attention_log( mover, z,mover)
+        anchor_att_ret_new = torch.transpose(anchor_att_ret_new,1,2)
         znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
         # znew = 2*z[:,:,None,:] - mover[:,None,:,:]
         # znew = z[:,:,None,:] + self.decoder_anchor_lin(mover)[:,None,:,:]
         # znew = znew +
-        ##### Get transfer matrix
-        anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
-        # print(anchor_value_cross[0])
-        #### topk in the transfer matrix
-        val,idx= anchor_value_cross.reshape((xs[0],-1)).topk(topk,dim=1)
         #### apply actions to states
-        #### take the top k states from transfer matrices
+        #### take the top k states from transfer matricesBeamMixtureRNN
+
+
+        if x.nelement() ==0:
+            x = torch.zeros((z.size(0),1),dtype=torch.long)
+        next_prob_dist = 'Posterior'
+        # sample_method = 'BeamSearch'
+        sample_method = 'MonteCarlo'
+        if next_prob_dist   == 'Generative':
+            anchor_value_cross = anchor_att_ret_new + anchor_att_ret
+        elif next_prob_dist == 'Posterior':
+            anchor_value_cross = anchor_att_ret_new + anchor_att_ret
+            ### Bayes Theorem
+            logprob_word_given_state = torch.gather(self.vocab(znew),dim=-1,index=x[:,None,None,:])[:,:,:,0]
+            logprob_word_and_state   = logprob_word_given_state + anchor_value_cross
+            anchor_value_cross = logprob_word_and_state
+        else:
+            assert 0, next_prob_dist
+
+        if sample_method=='MonteCarlo':
+            #### Sample With Beam Search
+            #### Sample With Montanchor_valuee-Carlo
+            T = .005
+            pp = anchor_value_cross/T
+            pp = pp - pp.max(dim=2,keepdims=True)[0]
+            cumsum_prob = (pp).exp().cumsum(dim=2)
+            isSel = (torch.rand(anchor_value_cross.shape)*cumsum_prob[:,:,-1:]) <= cumsum_prob
+            # isSel = isSel*1.
+            # isSel = isSel.argmax(dim=2)
+            isSel = isSel.max(dim=2)[1]
+            idx   = (torch.range( 0,topk-1,dtype=torch.long)[None,:] * nextk) + isSel[:,:]
+            val   = torch.gather(anchor_value_cross,dim=2,index=isSel[:,:,None])[:,:,0]
+        elif sample_method == 'BeamSearch':
+            val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
+        else:
+            assert 0,sample_method
+
         znew  = znew.reshape((xs[0],-1, self.embed_dim))
         znew  = torch.gather(znew, dim=1, index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
 
@@ -452,7 +476,7 @@ class BeamMixtureRNN(nn.Module):
         zs             = torch.cat([ zs,         emm[:,None,:,:]],dim=1)
         anchor_value   = None
         hidden = (z, anchor_value, anchor_att_ret, idxpointer, zs )
-        return hidden, y
+        return hidden, z #, y
 
     def forward(self, hidden_state, output_sequence):
         x = self.embedding_out(output_sequence).to(self.device)
@@ -677,16 +701,12 @@ class BeamAnchorMixtureRNN(nn.Module):
         achs = mover[:,:nextk,:]
         anchor_att_ret_new = anchor_att_log(achs,z,achs)
 
-
         #### Get actions
         # anchor_value_disp = self.decoder_anchor_disp(achs)
         # anchor_value_disp = self.decoder_anchor_disp(achs)
         # znew  = z[:,:,None,:] + anchor_value_disp[:,None,:,:]
-
         # znew = self.decoder_anchor_disp_list[0](z)
         znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
-        # print(znew.shape)
-        # assert 0
 
         ##### Get transfer matrix
         anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
@@ -696,8 +716,8 @@ class BeamAnchorMixtureRNN(nn.Module):
 
         #### apply actions to states
         #### take the top k states from transfer matrices
-        znew  = znew.reshape((x.size(0),-1, self.embed_dim))
-        znew = torch.gather(znew,dim=1,index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
+        znew  =  znew.reshape((x.size(0),-1, self.embed_dim))
+        znew  =  torch.gather(znew,dim=1,index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
 
         anchor_att_ret =  val[:,:,None]
         anchor_att_ret = anchor_att_ret - anchor_att_ret.max(dim=1,keepdims=True)[0]
@@ -731,20 +751,232 @@ class BeamAnchorMixtureRNN(nn.Module):
         #### cut the hidden_state z here
         return ( z,anchor_value, anchor_att_ret, bpointer,zs),y
 
+
+
+
+class MCMCAnchorMixtureRNN(nn.Module):
+    '''
+    Apply an enriched dynamics by splitting the phase space into different regions
+    Anchors value will be updated if particular phase space is visited, to store memory
+    '''
+    def __init__(self, embed_dim, mixture_count, vocab_size,output_vocab_size,max_context_length,CUDA=False):
+        super(MCMCAnchorMixtureRNN, self).__init__()
+        self.embed_dim = embed_dim
+        self.mixture_count = mixture_count
+
+        self.embedding     = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding_out = Embeddings(output_vocab_size,embed_dim, CUDA=CUDA)
+        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+
+        self.device = torch.device('cuda:0' if CUDA else 'cpu')
+        self.encoded = False
+        anchor_count = mixture_count
+        self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+
+        self.encoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+        self.encoder_anchor_attention = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_reader = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = True,mask=False,CUDA=CUDA)
+        self.decoder_anchor_key= nn.Linear(embed_dim,anchor_count,)
+
+        self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        self.decoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
+        self.decoder_anchor_attention_log = SelfAttention(
+        embed_dim,embed_dim,embed_dim,is_value_embed = False, return_attention=True, is_state_transfer=True,mask=False,CUDA=CUDA,
+        return_log=True,
+        )
+        self.decoder_anchor_disp = nn.Linear(embed_dim,embed_dim)
+        self.decoder_anchor_disp_list = nn.ModuleList( [nn.Linear(embed_dim,embed_dim) for _ in range(self.mixture_count)] )
+
+        self.norm1 = LayerNorm(embed_dim)
+        self.norm2 = LayerNorm(embed_dim)
+        self.topk = 5
+        # self.norm3 = LayerNorm(embed_dim)
+
+    def encode(self,input_sequence):
+        x = self.embedding(input_sequence).to(self.device);
+        xs = x.shape
+        z = torch.zeros([xs[0],1,xs[2]])                 ### init at origin
+        mover = self.encoder_mover.weight                ### load dynamics
+        mover = (z+1)*mover[None,:,:]                    ### reshaping
+        mover_att    = self.encoder_attention
+        anchor_key   = self.encoder_anchor_key.weight
+        anchor_key   = (z*0+1)*anchor_key[None,:,:]
+        anchor_value = 0*anchor_key
+        anchor_att   = self.encoder_anchor_attention
+        norm = self.norm1
+        anchor_norm  =self.norm1
+        # anchor_norm  =self.norm3
+        for i in range(x.shape[1]):
+            # print((anchor_value[0,:,:4]*10).cpu().detach().numpy().astype('int'))
+            # print()
+            z  =  z + x[:,i:i+1,:]
+            g  =  torch.cat([z, mover,],dim=1)
+            dg =  mover_att(g,g,g)
+            z  = z + dg[:,0:1]
+            z  = norm(z)
+            anchor_att_ret = anchor_att(anchor_key,z,z)
+            # anchor_att_ret = anchor_att_ret - torch.mean(anchor_att_ret,dim=1,keepdims=True)
+            # anchor_value  = anchor_value + anchor_att_ret *z
+            # anchor_value  = norm(anchor_value)
+            anchor_value  = (1-anchor_att_ret) * anchor_value + anchor_att_ret *z
+            anchor_value  = anchor_norm(anchor_value)
+            # , anchor_att_ret.sum(axis=1)[0])
+
+        idxpointer = torch.tensor([],requires_grad=False,dtype=torch.long).to(self.device)
+        znew    = torch.tensor([],requires_grad=True).to(self.device)
+        z = z  + torch.zeros([xs[0], self.topk, xs[2]])
+        anchor_att_ret = torch.zeros([xs[0],self.topk,1])
+
+        # assert 0.
+        return (  0*z , anchor_value, anchor_att_ret, idxpointer, 0*z[:,None,:,:])
+
+    def step(self, hidden,x):
+        # x = self.embedding_out(x).to(self.device)
+        z, anchor_value,anchor_att_ret,idxpointer,zs = hidden
+
+        sample_method = 'BeamSearch'
+        next_prob_dist = 'Posterior'
+        # sample_method = 'BaumWelch'  ### not really a sampling method
+        # next_prob_dist = ''
+        xs    = x.shape
+        topk  = self.topk
+        norm  = self.norm2
+        att   = self.decoder_attention
+        mover = self.decoder_mover.weight
+        mover = torch.zeros([xs[0], 1, self.embed_dim])+mover[None,:,:]
+
+        anchor_att_log   = self.decoder_anchor_attention_log
+        anchor_reader    = self.decoder_anchor_reader
+
+
+        anchor_key   = self.encoder_anchor_key.weight
+        anchor_key   = (z[:,0:1,:]*0+1)*anchor_key[None,:,:]
+        if x.nelement() ==0:
+            x = torch.zeros((z.size(0),1),dtype=torch.long)
+
+        # torch.Size([64, 20, 64])
+
+        anchor_att_ret = torch.zeros([xs[0],topk,1]) + anchor_att_ret
+        # z = z + torch.zeros([xs[0], topk, xs[2]])
+        nextk = self.mixture_count
+
+
+        _print = lambda *x:None
+
+        z = z + torch.zeros([xs[0], topk, self.embed_dim])
+
+        #### get probability of actions
+        # achs = torch.cat([anchor_value[:,:-5,:],mover[:,:5,:]],dim=1)
+        achs = mover[:,:nextk,:]
+        anchor_att_ret_new = anchor_att_log(achs,z,achs)
+        # anchor_att
+
+        #### Get actionsx.nelement()
+        # znew = self.decoder_anchor_disp_list[0](z)
+        znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
+
+        anchor_att_ret_new = torch.transpose(anchor_att_ret_new[:,:,:],1,2)*15
+        # print(anchor_att_ret_new[0].exp().sum(dim=1))
+        # print(anchor_att_ret_new[0].exp().shape, topk, nextk)
+        ##### Get transfer matrix
+        ####
+        if next_prob_dist   == 'Generative':
+            anchor_value_cross = anchor_att_ret_new + anchor_att_ret
+        elif next_prob_dist == 'Posterior':
+            anchor_value_cross = anchor_att_ret_new + anchor_att_ret
+            ### Bayes Theorem
+            logprob_word_given_state = torch.gather(self.vocab(znew),dim=-1,index=x[:,None,None,:])[:,:,:,0]
+            logprob_word_and_state   = logprob_word_given_state + anchor_value_cross
+            anchor_value_cross = logprob_word_and_state
+            # print(x[0])
+            # print(anchor_value_cross.shape)
+            # total_em = logprob_word_and_state  + anchor_va
+            # anchor_value_cross
+
+            # print( anchor_value_cross.shape, logprob_word_given_state.shape)
+            # assert 0
+            # word_give_state =
+        else:
+            assert 0, next_prob_dist
+
+
+        if sample_method=='MonteCarlo':
+
+            #### Sample With Montanchor_valuee-Carlo
+            cumsum_prob = anchor_value_cross.exp().cumsum(dim=2)
+            isSel = (torch.rand(anchor_value_cross.shape)*cumsum_prob[:,:,-1:]) <= cumsum_prob
+            isSel = isSel.max(dim=2)[1]
+            idx   = (torch.range( 0,topk-1,dtype=torch.long)[None,:] * nextk) + isSel[:,:]
+            val   = torch.gather(anchor_value_cross,dim=2,index=isSel[:,:,None])[:,:,0]
+            # print(idx.shape,val.shape)
+            # val   =
+            # isSel =
+            # print(anchor_value_cross.exp().cumsum(dim=2)[0])
+            # print(isSel[0],idx[0])
+        elif sample_method == 'BeamSearch':
+            #### Sample With Beam Search
+
+            ### topk in the transfer matrix
+            val,idx= anchor_value_cross.reshape((x.size(0),-1)).topk(topk,dim=1)
+
+        else:
+            assert 0,sample_method
+
+        #### apply actions to states
+        #### take the top k states from transfer matrices
+        znew  =  znew.reshape((x.size(0),-1, self.embed_dim))
+        znew  =  torch.gather(znew,dim=1,index=torch.cat([idx[:,:,None] for _ in range(znew.size(-1))],dim=-1))
+
+        anchor_att_ret =  val[:,:,None]
+        anchor_att_ret = anchor_att_ret - anchor_att_ret.max(dim=1,keepdims=True)[0]
+
+        z = znew
+        idxpointer = torch.cat([ idxpointer, idx[:,None,:] ],dim=1)
+
+        #### Save state for later emssion
+        z = z
+        z = norm(z)
+        emm = anchor_reader(z, anchor_key, anchor_value)
+        # emm = anchor_reader(z, anchor_value, anchor_value)
+        zs = torch.cat([zs,emm[:,None,:,:]],dim=1)
+
+        # print(idxpointer.shape)
+        # print(zs.shape)
+        # print()
+
+        y_right = self.vocab(z[:,0:1,:])
+        return (z, anchor_value,anchor_att_ret,idxpointer,zs),y_right
+
+    def forward(self, hidden_state, output_sequence):
+        z, anchor_value, anchor_att_ret, bpointer,zs = hidden_state
+
+        y = self.vocab(z)[:,0:1,:]
+        for i in range(x.shape[1]):
+            hidden_state,y = self.step(hidden_state, x[:,i:i+1])
+
+        #### cut the hidden_state z here
+        return ( z,anchor_value, anchor_att_ret, bpointer,zs),y
+
+
 import math
 def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
     g = batch_target.shape
     self = model
-    if isinstance(model,(BeamAnchorMixtureRNN,BeamMixtureRNN)):
+    if isinstance(model,(BeamAnchorMixtureRNN,BeamMixtureRNN, MCMCAnchorMixtureRNN)):
         '''
         Sample the top-k most likely chains using
         a beam search heuristic
         '''
         logps = torch.tensor([],requires_grad=True).to(self.device)
         for i in range(g[1]-1):
+            x = batch_target[:,i-1:i]
+            # x = 0*x
+            # assert 0
             ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
             logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
-            hidden, yf = self.step(hidden, batch_target[:,i-1:i])
+            hidden, yf = self.step(hidden, x)
 
         ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
         logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
@@ -754,7 +986,7 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         fpointer = idxpointer%nextk
 
         ####
-        topk = 20
+        topk = min(20,model.topk)
         bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
         pointers = bp * nextk
         its = list(range(g[1]-1 -1, 0 -1,-1))
@@ -766,28 +998,36 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
 
         pointers_back = pointers//nextk
         zsel     = torch.cat([torch.gather(zs[:,:,:,i:i+1],dim=2,index=pointers_back[:,:,:,None]) for i in range(zs.size(3))], dim=3)
-        logpsel  = torch.gather(logps, 2, pointers_back)
-        logpsel  = logpsel.sum(dim=1,keepdims=True)
+        logpsel  = torch.gather(logps, 2, pointers_back[:,])
+        logpsel  = logpsel[:,-1:,:] / logpsel.size(1)
+        # logpsel  = logpsel.mean(dim=2,keepdims=True)
         psel     = logpsel
         psel     = F.log_softmax(logpsel,dim=2)
         # - math.log(psel.size(2))
         out_prob_bychain = self.vocab(zsel)
-        out_prob = torch.mean(torch.exp(out_prob_bychain),dim=2)
+        # out_prob = torch.mean(torch.exp(out_prob_bychain),dim=2)
 
         out_prob_bychain = ( psel[:,:,:,None]/out_prob_bychain.size(3) + out_prob_bychain )
         # out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
+        eps=  1E-6
+        out_prob = torch.log(eps + out_prob_bychain.exp().mean(dim=2))
+        out_prob = out_prob[:,:]
+        # print(out_prob.shape)
+        # print(out_prob_bychain.shape)
+        # print(psel.shape)
+        # assert 0
+
         if print_debug:
             print(psel.shape,out_prob_bychain.shape)
             print(out_prob[0][5].sum(-1))
             print(pointers_back[0,-31:,:])
             print(torch.exp(psel[:,:,:,None]+out_prob_bychain)[0,1].sum(-1))
         # out_prob = torch.sum(torch.exp( out_prob_bychain),dim=2)
-        eps=  1E-6
         # out_prob = F.softmax(psel[:,:,:,None]+ out_prob_bychain,dim=2)
-        out_prob = torch.log(eps + out_prob)
-        out_prob = out_prob[:,:]
         model.pointers = pointers
-        return out_prob
+        return out_prob,None
+        # return out_prob, out_prob_bychain
+        # return out_prob
 
 
     else:
@@ -1236,11 +1476,11 @@ class TransformerTranslatorFeng(nn.Module):
     def __init__(self,embed_dim,num_blocks,num_heads,vocab_size,
     output_vocab_size,max_context_length,CUDA=False):
         super(TransformerTranslatorFeng,self).__init__()
-        self.embedding = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
+        self.embedding  = Embeddings(vocab_size,embed_dim,CUDA=CUDA)
         self.embedding2 = Embeddings(output_vocab_size,embed_dim,CUDA=CUDA)
-        self.vocab = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
-        self.encoder = Encoder2(embed_dim,num_heads,num_blocks,CUDA=CUDA)
-        self.decoder = Decoder(embed_dim,num_heads,num_blocks,output_vocab_size,CUDA=CUDA)
+        self.vocab      = VocabLogits(embed_dim,output_vocab_size,CUDA=CUDA)
+        self.encoder    = Encoder2(embed_dim,num_heads,num_blocks,CUDA=CUDA)
+        self.decoder    = Decoder(embed_dim,num_heads,num_blocks,output_vocab_size,CUDA=CUDA)
         # self.decoder2 = Encoder2(embed_dim,num_heads,num_blocks,CUDA=CUDA)
         self.pdec     = PositionalDecoder(embed_dim, max_context_length, embed_dim)
         # self.embedding_pe_enc = nn.Linear(embed_dim+self.pdec.pe_len,embed_dim)

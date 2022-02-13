@@ -19,7 +19,7 @@ CUDA = 1
 PRINT_INTERVAL = 5000
 VALIDATE_AMOUNT = 10
 
-batch_size = 128
+batch_size = 81
 embed_dim = 64
 num_blocks = 12
 num_heads = 1 #Must be factor of token size
@@ -53,8 +53,10 @@ from Transformer.transfomer import DynamicMixtureRNN
 from Transformer.transfomer import JointMixtureRNN
 from Transformer.transfomer import SecondOrderMixtureRNN
 from Transformer.transfomer import AnchorMixtureRNN
+from Transformer.transfomer import MCMCAnchorMixtureRNN
 from Transformer.transfomer import BeamAnchorMixtureRNN
 from Transformer.transfomer import AnchorOnlyMixtureRNN
+# from Transformer.transfomer import MCMCAnchorOnlyMixtureRNN
 from Transformer.transfomer import BeamMixtureRNN
 from Transformer.transfomer import decode_with_target
 # model = TransformerTranslatorFeng(embed_dim,num_blocks,num_heads, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
@@ -64,9 +66,10 @@ from Transformer.transfomer import decode_with_target
 # model = DynamicMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = MixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = AnchorOnlyMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
-model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = BeamAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
-# model = BeamMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = MCMCAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+model = BeamMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
@@ -99,26 +102,35 @@ def loss_kldiv(pred, target):
     # loss.sum(dim=(1,2)).mean(dim=0)
 
 baseline = [0.]
-def loss_with_baseline(pred, target):
+def loss_with_baseline(out, target):
+    pred,out_prob_bychain = out
 
     ## pred
     # print(input[0][0][:5],target[0][0][:5])
     # loss = torch.exp(pred) * (pred- target)
     # print(pred[0,:3,:10])
-    loss = - (pred) * (target - 0.000)
+    loss = -(pred) * (target - 0.000)
     # ### encourage
     loss = (loss.sum(dim=(1,2)) - baseline[0]).mean(dim=0)
-
     # loss = - torch.exp(pred) * target
-    # # ### encourage
+    ##### encourage
     # loss = loss.sum(dim=(1,2)).mean(dim=0)
     # # loss = - pred * target
     return loss
 
+def loss_by_chain(out, target):
+    pred,out_prob_bychain = out
+    ###### pred
+    loss = - (out_prob_bychain) * (target[:,:,None,:] - 0.000)
+    loss = loss.sum(dim=(1,3)).mean(dim=(0,1))
+    ###### encourage
+    return loss
+
 # criterion = sqrt_sum
-# criterion = nn.KLDivLoss(reduction='batchmean')
-criterion = loss_with_baseline
+criterion = lambda out,target,f=nn.KLDivLoss(reduction='batchmean'): f(out[0],target)
+# criterion = loss_by_chain
 optimizer = torch.optim.Adam( model.parameters(), lr=learning_rate)
+# optimizer = torch.optim.Adagrad( model.parameters(), lr=learning_rate)
 """
 Load From Checkpoint
 """
@@ -127,12 +139,11 @@ import sys
 import glob
 from pprint import pprint
 os.makedirs('Checkpoints') if not os.path.exists('Checkpoints') else None
-
+criterion
 if '--LOAD' in sys.argv:
     LOAD = sys.argv[sys.argv.index('--LOAD')+1]
 else:
     LOAD = None
-    # LOAD = int(LOAD)
 
 
 if LOAD == 'auto':
@@ -146,18 +157,15 @@ else:
     LOAD = -1
 
 
-
-
 IS_GREEDY = '--greedy' in sys.argv
 STRICT_LOAD = '--nostrict' not in sys.argv
 def main():
     if(LOAD!=-1):
-        checkpoint   = torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
-        test_losses  = checkpoint["test_losses"]
-        train_losses = checkpoint["train_losses"]
-        num_steps    = checkpoint["num_steps"]
+        checkpoint   =  torch.load(os.path.join("Checkpoints","Checkpoint"+str(LOAD)+".pkl"))
+        test_losses  =  checkpoint["test_losses"]
+        train_losses =  checkpoint["train_losses"]
+        num_steps    =  checkpoint["num_steps"]
         x = checkpoint["model"]
-
         xx = {}
         for k,v in x.items():
             if k in dict(model.named_parameters()):
@@ -167,7 +175,6 @@ def main():
                 # print(k)
         x = xx
         # x = {k:v for k,v in x.items() if k in dict(model.named_parameters())}
-
         model.load_state_dict(x,strict=STRICT_LOAD)
         # optimizer.load_state_dict(checkpoint["optimizer"])
     else:
@@ -207,21 +214,19 @@ def main():
             # print(item["german"][:,1:-1][:1])
             ###################
 
-
             item['german'] = item['german'][:,1:]
             item['logits'] = item['logits'][:,1:]
             item['logit_mask'] = item['logit_mask'][:,1:]
-            all_outs = decode_with_target(model,  hidden, item['german'],IS_GREEDY)
-
-
+            out = decode_with_target(model,  hidden, item['german'],IS_GREEDY)
+            all_outs,all_outs_by_chain = out
 
             ###################
             #BackProp
-            loss = criterion(all_outs, (item["logits"]* item["logit_mask"]))
+            loss = criterion(out, (item["logits"]* item["logit_mask"]))
             loss.backward()
             optimizer.step()
-            ###################
 
+            ###################
             running_loss.append(loss.item())
             num_steps +=1
             """
@@ -243,22 +248,19 @@ def main():
                         sents += ['Herr Herr Herr Herr'  + ' <start>'*30]
                         sents += ['Herr Präsident'  + ' <start>'*30]
                         # sents += ['Herr Präsident , Herr Kollegen' ] #+ ' <start>'*30
-
                         sents = [
                         torch.tensor([dataset.english_vocab_reversed.index(xx) for xx in sent.replace(' ','| |').split('|')],dtype=torch.long).cpu()
                         for sent in sents]
-                        # to(device)
                         x = dataset.english_sentences_test[0:3] + sents
-                        # [tok]
-                        x = [xx[:13] for xx in x]
+                        x = [xx[:14] for xx in x]
                         # x = torch.cat(x,dim=0).to(device)
                         x = torch.stack(x,dim=0)[:,:].to(device)
                         print([dataset.english_vocab_reversed[xx] for xx in x.cpu().detach().numpy().ravel()])
 
-
-
                         hidden = model.encode(x)
-                        all_outs = decode_with_target(model, hidden, x, is_greedy=1)
+                        out = decode_with_target(model, hidden, x, is_greedy=1)
+                        all_outs,all_outs_by_chain = out
+
                         for vidx in range(len(x)):
                             print('==============')
                             print('INPUT:'+ ','.join([dataset.english_vocab_reversed[xx].__repr__() for xx in x[vidx].cpu().detach().numpy().ravel()]))
@@ -266,7 +268,6 @@ def main():
                             pred_tok = [dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]
                             # print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
                             if isinstance(hidden,tuple) and hasattr(model,'pointers'):
-
                                 # list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
                                 # ( z,anchor_value, anchor_att_ret, bpointer,zs )  = hidden
                                 for toki in range(pred_tok.__len__()):
@@ -286,17 +287,18 @@ def main():
                         g = item["german"].shape
                         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(device)
 
-                        all_outs = decode_with_target(model, hidden, item["german"], IS_GREEDY)
+                        out = decode_with_target(model, hidden, item["german"], IS_GREEDY)
+                        all_outs, all_outs_by_chain = out
 
                         item["logits"] = item["logits"] * item["logit_mask"]
-                        loss = criterion(all_outs,item["logits"])
+                        loss = criterion(out,item["logits"])
                         running_test_loss.append(loss.item())
                         if(jdx==VALIDATE_AMOUNT):
                             break
 
                 avg_test_loss = np.array(running_test_loss).mean()
                 test_losses.append(avg_test_loss)
-                avg_loss = np.array(running_loss).mean()
+                avg_loss      = np.array(running_loss).mean()
                 train_losses.append(avg_loss)
                 for vidx in [0,1]:
                     print("===")
@@ -322,19 +324,18 @@ def main():
                 # print(_x)
                 # print()
                 #
-                # _x = (f(model.norm2(f(model.decoder_mover.weight[4:7,:])))*100).cpu().detach().numpy().astype(int)
-                # print(_x)
-                # print()
                 # _x = (model.decoder_anchor_disp_list[5](model.decoder_mover.weight[4:7,:]-model.decoder_mover.weight[4:7,:])*100).cpu().detach().numpy().astype(int)
                 # print(_x)
+                # print()
+                #
                 # ,model.decoder_anchor_disp_list[5].weight,)
                 # print("PRED: ",list(dataset.logit_to_sentence(all_outs[0])))
+                #
+
                 print(f"TRAIN LOSS {avg_loss} | EPOCH {epoch}")
                 print(f"TEST LOSS {avg_test_loss} | EPOCH {epoch}")
                 print("BACK TO TRAINING:")
                 dataset.train()
-
-
                 # model.encoder.show_matrix(__file__+'.html')
 
             if(num_steps % SAVE_INTERVAL ==0):
@@ -345,4 +346,6 @@ def main():
                     "train_losses":train_losses,
                     "test_losses":test_losses
                 },os.path.join("Checkpoints","Checkpoint"+str(num_steps)+".pkl"))
-main()
+
+if __name__ =='__main__':
+    main()
