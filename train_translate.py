@@ -64,9 +64,9 @@ from Transformer.transfomer import decode_with_target
 # model = DynamicMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = MixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = AnchorOnlyMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
-# model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+model = AnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 # model = BeamAnchorMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
-model = BeamMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
+# model = BeamMixtureRNN(embed_dim,num_blocks, dataset.english_vocab_len, dataset.german_vocab_len,max_context_length=max_context_length,CUDA=CUDA).to(device)
 
 """
 Loss Function + Optimizer
@@ -79,10 +79,46 @@ def sqrt_sum( output_log , target):
     #(output-target*2)**3)
     return loss
 
-criterion = sqrt_sum
 
+
+def loss_kldiv(pred, target):
+
+    ## pred
+    # print(input[0][0][:5],target[0][0][:5])
+    # loss = torch.exp(pred) * (pred- target)
+    loss = - (pred) * target
+    # ### encourage
+    loss = loss.sum(dim=(1,2)).mean(dim=0)
+
+
+    # loss = - torch.exp(pred) * target
+    # # ### encourage
+    # loss = loss.sum(dim=(1,2)).mean(dim=0)
+    # # loss = - pred * target
+    return loss
+    # loss.sum(dim=(1,2)).mean(dim=0)
+
+baseline = [0.]
+def loss_with_baseline(pred, target):
+
+    ## pred
+    # print(input[0][0][:5],target[0][0][:5])
+    # loss = torch.exp(pred) * (pred- target)
+    # print(pred[0,:3,:10])
+    loss = - (pred) * (target - 0.000)
+    # ### encourage
+    loss = (loss.sum(dim=(1,2)) - baseline[0]).mean(dim=0)
+
+    # loss = - torch.exp(pred) * target
+    # # ### encourage
+    # loss = loss.sum(dim=(1,2)).mean(dim=0)
+    # # loss = - pred * target
+    return loss
+
+# criterion = sqrt_sum
+# criterion = nn.KLDivLoss(reduction='batchmean')
+criterion = loss_with_baseline
 optimizer = torch.optim.Adam( model.parameters(), lr=learning_rate)
-criterion = nn.KLDivLoss(reduction='batchmean')
 """
 Load From Checkpoint
 """
@@ -229,7 +265,8 @@ def main():
                             print('PRED:'+ ','.join([dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]))
                             pred_tok = [dataset.german_vocab_reversed[xx].__repr__() for xx in all_outs[vidx].argmax(-1).cpu().detach().numpy().ravel()]
                             # print("PRED: ",(dataset.logit_to_sentence(all_outs[vidx])))
-                            if isinstance(hidden,tuple):
+                            if isinstance(hidden,tuple) and hasattr(model,'pointers'):
+
                                 # list(map( lambda x:[print(('%d, '%xx).rjust(5,' '),end='') for xx in x] + [print()],(hidden[1][vidx,:,:5].T.cpu().numpy()*10).astype(int).tolist()))
                                 # ( z,anchor_value, anchor_att_ret, bpointer,zs )  = hidden
                                 for toki in range(pred_tok.__len__()):
@@ -269,11 +306,35 @@ def main():
                     print()
                     # print("===")
 
+
+                # print((model.decoder_anchor_disp_list[5].weight[:15,:15].cpu().detach()*100).numpy().astype(int))
+                # _x = (model.decoder_anchor_disp_list[5].bias*100)
+                # print(_x.cpu().detach().numpy().astype(int))
+                # [:5,:5])
+                # print((model.decoder_anchor_disp_list[6].weight[:5,:5].cpu().detach()*100).numpy().astype(int))
+                # print(model.decoder_anchor_disp_list[6].bias)
+                #
+                # print((model.decoder_mover.weight[4:7,:].cpu().detach()*100).numpy().astype(int))
+                # print()
+                #
+                # f = model.decoder_anchor_disp_list[5]
+                # _x = (f(model.decoder_mover.weight[4:7,:])*100).cpu().detach().numpy().astype(int)
+                # print(_x)
+                # print()
+                #
+                # _x = (f(model.norm2(f(model.decoder_mover.weight[4:7,:])))*100).cpu().detach().numpy().astype(int)
+                # print(_x)
+                # print()
+                # _x = (model.decoder_anchor_disp_list[5](model.decoder_mover.weight[4:7,:]-model.decoder_mover.weight[4:7,:])*100).cpu().detach().numpy().astype(int)
+                # print(_x)
+                # ,model.decoder_anchor_disp_list[5].weight,)
                 # print("PRED: ",list(dataset.logit_to_sentence(all_outs[0])))
                 print(f"TRAIN LOSS {avg_loss} | EPOCH {epoch}")
                 print(f"TEST LOSS {avg_test_loss} | EPOCH {epoch}")
                 print("BACK TO TRAINING:")
                 dataset.train()
+
+
                 # model.encoder.show_matrix(__file__+'.html')
 
             if(num_steps % SAVE_INTERVAL ==0):

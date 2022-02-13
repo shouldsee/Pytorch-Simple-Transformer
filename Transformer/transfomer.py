@@ -362,6 +362,8 @@ class BeamMixtureRNN(nn.Module):
 
         self.encoder_mover = nn.Linear(embed_dim,mixture_count,)
         self.decoder_mover = nn.Linear(embed_dim,mixture_count,)
+        # self.decoder_mover_ = nn.Linear(embed_dim,embed_dim,)
+
         self.decoder_mover_disp = nn.Linear(embed_dim,mixture_count,)
 
         self.encoder_attention = SelfAttention(embed_dim,embed_dim,embed_dim,is_value_embed = 1,mask=False,CUDA=CUDA)
@@ -372,7 +374,7 @@ class BeamMixtureRNN(nn.Module):
         return_log=True,
         )
         self.decoder_anchor_disp_list = nn.ModuleList( [nn.Linear(embed_dim,embed_dim) for _ in range(self.mixture_count)] )
-        # self.decoder_anchor_lin = nn.Linear(emebd)
+        self.decoder_anchor_lin = nn.Linear(embed_dim,embed_dim)
 
         self.norm1 = LayerNorm(embed_dim)
         self.norm2 = LayerNorm(embed_dim)
@@ -407,7 +409,7 @@ class BeamMixtureRNN(nn.Module):
     def step(self, hidden, x):
         (z, _, anchor_att_ret, idxpointer, zs ) = hidden
         x = self.embedding_out(x).to(self.device)
-
+        x = 0*x #[DBG CONTROL]
         # z = hidden_state
         nextk              = self.mixture_count
         topk  = self.topk
@@ -418,7 +420,7 @@ class BeamMixtureRNN(nn.Module):
         mover = torch.zeros([xs[0],1,1])+mover
 
         if  min(x.shape)!=0:
-            z = z +0 * x[:,:,:]
+            z = z + x[:,:,:]
         # g  = torch.cat([z, mover,],dim=1)
         # dg = att(g,g,g)
         # z = z + dg[:,0:1]
@@ -426,8 +428,9 @@ class BeamMixtureRNN(nn.Module):
         y = self.vocab(z)
 
         anchor_att_ret_new = self.decoder_anchor_attention_log( mover, z,mover)
-        # znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
-        znew = z[:,:,None,:] + self.decoder_mover_disp.weight[None,None,:,:]
+        znew = torch.cat([self.decoder_anchor_disp_list[i](z)[:,:,None,:] for i in range(nextk)],dim=2)
+        # znew = 2*z[:,:,None,:] - mover[:,None,:,:]
+        # znew = z[:,:,None,:] + self.decoder_anchor_lin(mover)[:,None,:,:]
         # znew = znew +
         ##### Get transfer matrix
         anchor_value_cross = torch.transpose(anchor_att_ret_new[:,:,:],1,2) + anchor_att_ret
@@ -729,12 +732,10 @@ class BeamAnchorMixtureRNN(nn.Module):
         return ( z,anchor_value, anchor_att_ret, bpointer,zs),y
 
 import math
-
-
 def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
     g = batch_target.shape
     self = model
-    if isinstance(model,BeamAnchorMixtureRNN):
+    if isinstance(model,(BeamAnchorMixtureRNN,BeamMixtureRNN)):
         '''
         Sample the top-k most likely chains using
         a beam search heuristic
@@ -753,7 +754,7 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         fpointer = idxpointer%nextk
 
         ####
-        topk = 10
+        topk = 20
         bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
         pointers = bp * nextk
         its = list(range(g[1]-1 -1, 0 -1,-1))
@@ -771,8 +772,10 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         psel     = F.log_softmax(logpsel,dim=2)
         # - math.log(psel.size(2))
         out_prob_bychain = self.vocab(zsel)
-        out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
-        # out_prob = torch.sum(torch.exp(out_prob_bychain),dim=2)
+        out_prob = torch.mean(torch.exp(out_prob_bychain),dim=2)
+
+        out_prob_bychain = ( psel[:,:,:,None]/out_prob_bychain.size(3) + out_prob_bychain )
+        # out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
         if print_debug:
             print(psel.shape,out_prob_bychain.shape)
             print(out_prob[0][5].sum(-1))
@@ -786,58 +789,6 @@ def decode_with_target(model,hidden, batch_target,is_greedy,print_debug=0):
         model.pointers = pointers
         return out_prob
 
-    elif isinstance(model,BeamMixtureRNN):
-    # elif 0:
-        '''
-        Sample the top-k most likely chains using
-        a beam search heuristic
-        '''
-        logps = torch.tensor([],requires_grad=True).to(self.device)
-        for i in range(g[1]-1):
-            ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
-            logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
-            hidden, yf = self.step(hidden, batch_target[:,i-1:i])
-
-        ( z,anchor_value, anchor_att_ret, idxpointer,zs )  = hidden
-        logps = torch.cat([logps,anchor_att_ret[:,None,:,0]],dim=1)
-
-        nextk = self.mixture_count
-        bpointer = idxpointer//nextk
-        fpointer = idxpointer%nextk
-
-        ####
-        topk = 10
-        bp = torch.arange(topk)[None,None,:] + torch.zeros_like(idxpointer[:,0:1,:topk])
-        pointers = bp * nextk
-        its = list(range(g[1]-1 -1, 0 -1,-1))
-        for i in its:
-            # print(i,g[1],bpointer.size(1))
-            bpnew      = torch.gather(idxpointer[:,i:i+1,:],dim=2,index=bp)
-            pointers   = torch.cat([bpnew,pointers],dim=1)
-            bp         = bpnew // nextk
-
-        pointers_back = pointers//nextk
-        zsel     = torch.cat([torch.gather(zs[:,:,:,i:i+1],dim=2,index=pointers_back[:,:,:,None]) for i in range(zs.size(3))], dim=3)
-        logpsel  = torch.gather(logps, 2, pointers_back)
-        logpsel  = logpsel.sum(dim=1,keepdims=True)
-        psel     = logpsel
-        psel     = F.log_softmax(logpsel,dim=2)
-        # - math.log(psel.size(2))
-        out_prob_bychain = self.vocab(zsel)
-        out_prob = torch.sum(torch.exp(psel[:,:,:,None]+ out_prob_bychain),dim=2)
-        # out_prob = torch.sum(torch.exp(out_prob_bychain),dim=2)
-        if print_debug:
-            print(psel.shape,out_prob_bychain.shape)
-            print(out_prob[0][5].sum(-1))
-            print(pointers_back[0,-31:,:])
-            print(torch.exp(psel[:,:,:,None]+out_prob_bychain)[0,1].sum(-1))
-        # out_prob = torch.sum(torch.exp( out_prob_bychain),dim=2)
-        eps=  1E-6
-        # out_prob = F.softmax(psel[:,:,:,None]+ out_prob_bychain,dim=2)
-        out_prob = torch.log(eps + out_prob)
-        out_prob = out_prob[:,:]
-        model.pointers = pointers
-        return out_prob
 
     else:
         x = torch.zeros( [g[0],g[1],],dtype=torch.long ).to(model.device)

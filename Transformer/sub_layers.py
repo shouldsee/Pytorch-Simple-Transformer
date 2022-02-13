@@ -102,7 +102,7 @@ class GenericAttention(nn.Module):
         # print(attention_weights.shape)
         attention_weights = attention_weights - 0.5 * torch.sum(torch.square(query),dim=2,keepdim=True)
         attention_weights = attention_weights - 0.5 * torch.transpose(torch.sum(torch.square(key),dim=2,keepdim=True),1,2)
-        attention_weights = attention_weights/math.sqrt(self.d_k)
+        attention_weights = attention_weights/math.sqrt(self.d_k)/1.
         if(self.mask==True):
             for i in range(attention_weights.shape[1]):
                 attention_weights[:,i,i] = float('-inf')
